@@ -120,6 +120,19 @@ impl P2PNode {
         let listen_addresses = Arc::new(Mutex::new(Vec::new()));
         let listen_addresses_clone = listen_addresses.clone();
 
+        // Wait for first listening address before continuing:
+        let first_address = loop {
+            match swarm.select_next_some().await {
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    println!("Listening on {address}");
+                    break address;
+                },
+                _ => continue,
+            }
+        };
+
+        listen_addresses_clone.lock().await.push(first_address);
+
         tokio::spawn(async move {
             let mut friend_list: Vec<PeerId> = Vec::new();
 
