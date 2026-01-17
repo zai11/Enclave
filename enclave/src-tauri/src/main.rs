@@ -23,8 +23,6 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
 
     *state.p2p_node.lock().await = Some(node);
 
-    //tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
     tokio::spawn(async move {
         while let Some(event) = event_receiver.recv().await {
             match event {
