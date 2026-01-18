@@ -15,7 +15,11 @@ struct AppState {
 
 #[tauri::command]
 async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<String, String> {
-    let (node, mut event_receiver) = P2PNode::new()
+    // For now, we are hardcoding a relay server ip:
+    // Format: /ip4/SERVER_IP/tcp/4001/p2p/RELAY_PEER_ID
+    let relay_address = Some("/ip4/127.0.0.1/tcp/4001".to_string());
+
+    let (node, mut event_receiver) = P2PNode::new(relay_address)
         .await
         .map_err(|err| err.to_string())?;
 
@@ -154,6 +158,19 @@ async fn get_friend_list(state: tauri::State<'_, AppState>) -> Result<Vec<String
     }
 }
 
+#[tauri::command]
+async fn connect_to_relay(state: tauri::State<'_, AppState>, relay_address: String) -> Result<(), String> {
+    let node_guard = state.p2p_node.lock().await;
+    if let Some(node) = node_guard.as_ref() {
+        let address = relay_address.parse::<Multiaddr>().map_err(|err| err.to_string())?;
+        node.connect_to_relay(address).map_err(|err| err.to_string())?;
+        Ok(())
+    }
+    else {
+        Err("P2P node not started".to_string())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 fn main() {
     tauri::Builder::default()
@@ -169,7 +186,8 @@ fn main() {
             deny_friend_request,
             send_message,
             send_direct_message,
-            get_friend_list
+            get_friend_list,
+            connect_to_relay
         ])
         .run(tauri::generate_context!())
         .expect("Error while running tauri application");

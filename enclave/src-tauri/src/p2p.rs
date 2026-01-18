@@ -1,6 +1,5 @@
 use libp2p::{
-    futures::StreamExt,
-    Multiaddr, PeerId, StreamProtocol, gossipsub, identity, noise, request_response as reqres, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux
+    Multiaddr, PeerId, StreamProtocol, Transport, dcutr, futures::StreamExt, gossipsub, identity, noise, relay, request_response as reqres, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux
 };
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
@@ -52,7 +51,9 @@ pub enum P2PEvent {
 #[derive(NetworkBehaviour)]
 struct EnclaveNetworkBehaviour {
     gossipsub: gossipsub::Behaviour,
-    request_response: reqres::cbor::Behaviour<P2PMessage, P2PMessage>
+    request_response: reqres::cbor::Behaviour<P2PMessage, P2PMessage>,
+    relay_client: relay::client::Behaviour,
+    dcutr: dcutr::Behaviour
 }
 
 enum SwarmCommand {
@@ -61,17 +62,19 @@ enum SwarmCommand {
     SendFriendRequest { peer: PeerId, address: Multiaddr, message: String },
     AcceptFriendRequest(PeerId),
     DenyFriendRequest(PeerId),
-    GetFriendList(tokio::sync::oneshot::Sender<Vec<PeerId>>)
+    GetFriendList(tokio::sync::oneshot::Sender<Vec<PeerId>>),
+    ConnectToRelay(Multiaddr)
 }
 
 pub struct P2PNode {
     peer_id: PeerId,
     listen_addresses: Arc<Mutex<Vec<Multiaddr>>>,
+    relay_address: Arc<Mutex<Option<Multiaddr>>>,
     swarm_sender: mpsc::UnboundedSender<SwarmCommand>
 }
 
 impl P2PNode {
-    pub async fn new() -> anyhow::Result<(Self, mpsc::UnboundedReceiver<P2PEvent>)> {
+    pub async fn new(relay_address: Option<String>) -> anyhow::Result<(Self, mpsc::UnboundedReceiver<P2PEvent>)> {
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
         println!("Local peer id: {local_peer_id}");
@@ -92,9 +95,15 @@ impl P2PNode {
             reqres::Config::default()
         );
 
+        let (relay_transport, relay_client) = relay::client::new(local_peer_id);
+
+        let dcutr = dcutr::Behaviour::new(local_peer_id);
+
         let behaviour = EnclaveNetworkBehaviour {
             gossipsub,
-            request_response
+            request_response,
+            relay_client,
+            dcutr
         };
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
@@ -104,6 +113,13 @@ impl P2PNode {
                 noise::Config::new,
                 yamux::Config::default
             )?
+            .with_other_transport(|key| {
+                relay_transport
+                    .upgrade(libp2p::core::upgrade::Version::V1)
+                    .authenticate(noise::Config::new(key).unwrap())
+                    .multiplex(yamux::Config::default())
+            })
+            .map_err(|err| anyhow::anyhow!("Error adding relay transport to swarm: {err}"))?
             .with_behaviour(|_| behaviour)
             .map_err(|err| anyhow::anyhow!("Error adding behaviour to swarm: {err}"))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
@@ -119,6 +135,16 @@ impl P2PNode {
 
         let listen_addresses = Arc::new(Mutex::new(Vec::new()));
         let listen_addresses_clone = listen_addresses.clone();
+        let relay_addr = Arc::new(Mutex::new(None));
+        let relay_addr_clone = relay_addr.clone();
+
+        if let Some(relay_str) = relay_address {
+            if let Ok(addr) = relay_str.parse::<Multiaddr>() {
+                println!("Connecting to relay: {}", addr);
+                swarm.dial(addr.clone())?;
+                *relay_addr_clone.lock().await = Some(addr);
+            }
+        }
 
         // Wait for first listening address before continuing:
         let first_address = loop {
@@ -152,7 +178,7 @@ impl P2PNode {
                                 }
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::RequestResponse(req_event)) => {
-                                if let reqres::Event::Message { peer, message } = req_event {
+                                if let reqres::Event::Message { peer, message, .. } = req_event {
                                     if let reqres::Message::Request { request, .. } = message {
                                         match request {
                                             P2PMessage::FriendRequest(req) => {
@@ -183,14 +209,22 @@ impl P2PNode {
                                     }
                                 }
                             },
+                            SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::RelayClient(event)) => {
+                                println!("Relay client event: {:?}", event);
+                            },
+                            SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::Dcutr(event)) => {
+                                println!("DCUTR event {:?}", event);
+                            }
                             SwarmEvent::NewListenAddr { address, .. } => {
                                 println!("Listening on {address}");
                                 listen_addresses_clone.lock().await.push(address);
                             },
                             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                                println!("Connected to peer: {peer_id}");
                                 let _ = event_sender.send(P2PEvent::PeerConnected(peer_id));
                             },
                             SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                println!("Disconnected from peer: {peer_id}");
                                 let _ = event_sender.send(P2PEvent::PeerDisconnected(peer_id));
                             },
                             _ => {}
@@ -203,7 +237,7 @@ impl P2PNode {
                                 // It may be good to accept direct messages from non-friend users but have them quarantined
                                 // separate from messages from friends. In that case, we can remove this condition.
                                 if !friend_list.contains(&peer) {
-                                    return;
+                                    continue;
                                 }
 
                                 let message = P2PMessage::DirectMessage(
@@ -237,10 +271,18 @@ impl P2PNode {
                             SwarmCommand::SendFriendRequest { peer, address, message } => {
                                 let _ = swarm.dial(address);
                                 let local_addresses = listen_addresses_clone.lock().await;
+                                let relay_addr_opt = relay_addr_clone.lock().await;
+
+                                let address_to_send = if let Some(relay) = relay_addr_opt.as_ref() {
+                                    format!("{}/p2p-circuit/p2p/{}", relay, swarm.local_peer_id())
+                                } else {
+                                    local_addresses.first().map(|a| a.to_string()).unwrap_or_default()
+                                };
+
                                 let request = P2PMessage::FriendRequest(
                                     FriendRequest {
                                         from_peer_id: swarm.local_peer_id().to_string(),
-                                        from_multiaddr: local_addresses.first().map(|a| a.to_string()).unwrap_or_default(),
+                                        from_multiaddr: address_to_send,
                                         message
                                     }
                                 );
@@ -252,10 +294,18 @@ impl P2PNode {
                                     swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
                                 }
                                 let local_addresses = listen_addresses_clone.lock().await;
+                                let relay_addr_opt = relay_addr_clone.lock().await;
+
+                                let address_to_send = if let Some(relay) = relay_addr_opt.as_ref() {
+                                    format!("{}/p2p-circuit/p2p/{}", relay, swarm.local_peer_id())
+                                } else {
+                                    local_addresses.first().map(|a| a.to_string()).unwrap_or_default()
+                                };
+
                                 let response = P2PMessage::FriendRequestResponse(
                                     FriendRequestResponse{
                                         accepted: true,
-                                        multiaddr: local_addresses.first().map(|a| a.to_string()).unwrap_or_default()
+                                        multiaddr: address_to_send
                                     }
                                 );
                                 swarm.behaviour_mut().request_response.send_request(&peer, response);
@@ -272,6 +322,11 @@ impl P2PNode {
                             SwarmCommand::GetFriendList(sender) => {
                                 let _ = sender.send(friend_list.clone());
                             },
+                            SwarmCommand::ConnectToRelay(address) => {
+                                println!("Connecting to relay: {}", address);
+                                let _ = swarm.dial(address.clone());
+                                *relay_addr_clone.lock().await = Some(address);
+                            }
                         }
                     }
                 }
@@ -282,6 +337,7 @@ impl P2PNode {
             Self {
                 peer_id: local_peer_id,
                 listen_addresses,
+                relay_address: relay_addr,
                 swarm_sender
             },
             event_receiver
@@ -293,7 +349,18 @@ impl P2PNode {
     }
 
     pub async fn get_listen_addresses(&self) -> Vec<Multiaddr> {
-        self.listen_addresses.lock().await.clone()
+        let mut addresses = self.listen_addresses.lock().await.clone();
+
+        if let Some(relay) = self.relay_address.lock().await.as_ref() {
+            let relay_circuit = format!("{}/p2p-circuit/p2p/{}", relay, self.peer_id)
+                .parse()
+                .ok();
+            if let Some(circuit_address) = relay_circuit {
+                addresses.push(circuit_address);
+            }
+        }
+
+        addresses
     }
 
     pub fn send_direct_message(&self, peer: PeerId, content: String) -> anyhow::Result<()> {
@@ -325,5 +392,10 @@ impl P2PNode {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.swarm_sender.send(SwarmCommand::GetFriendList(sender))?;
         Ok(receiver.await?)
+    }
+
+    pub fn connect_to_relay(&self, address: Multiaddr) -> anyhow::Result<()> {
+        self.swarm_sender.send(SwarmCommand::ConnectToRelay(address))?;
+        Ok(())
     }
 }
