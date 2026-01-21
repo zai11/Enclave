@@ -227,16 +227,6 @@
                 {/each}
               </ul>
             {/if}
-            <h3 style="margin-top: 16px;">Connected ({connectedPeers.length})</h3>
-            {#if connectedPeers.length === 0}
-              <p class="empty">No friends connected</p>
-            {:else}
-              <ul>
-                {#each connectedPeers as peer}
-                  <li class="peer-item">{peer.slice(0, 16)}...</li>
-                {/each}
-              </ul>
-            {/if}
             <button on:click={() => showAddFriend = !showAddFriend} class="btn-secondary">Send Friend Request</button>
             {#if pendingRequests.length > 0}
               <button on:click={() => showFriendRequests = !showFriendRequests} class="btn-primary" style="margin-top: 8px;">Friend Requests ({pendingRequests.length})</button>
