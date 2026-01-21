@@ -1,8 +1,8 @@
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, Transport, dcutr, futures::StreamExt, gossipsub, identity, noise, relay, request_response as reqres, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux
+    Multiaddr, PeerId, StreamProtocol, Transport, dcutr, futures::StreamExt, gossipsub, identity, noise, ping, relay, request_response as reqres, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux
 };
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration, u64};
 use tokio::sync::{Mutex, mpsc};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +53,8 @@ struct EnclaveNetworkBehaviour {
     gossipsub: gossipsub::Behaviour,
     request_response: reqres::cbor::Behaviour<P2PMessage, P2PMessage>,
     relay_client: relay::client::Behaviour,
-    dcutr: dcutr::Behaviour
+    dcutr: dcutr::Behaviour,
+    ping: ping::Behaviour
 }
 
 enum SwarmCommand {
@@ -77,7 +78,7 @@ impl P2PNode {
     pub async fn new(relay_address: Option<String>) -> anyhow::Result<(Self, mpsc::UnboundedReceiver<P2PEvent>)> {
         let local_key = identity::Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(local_key.public());
-        println!("Local peer id: {local_peer_id}");
+        log::info!("Local peer id: {local_peer_id}");
 
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(1))
@@ -98,12 +99,14 @@ impl P2PNode {
         let (relay_transport, relay_client) = relay::client::new(local_peer_id);
 
         let dcutr = dcutr::Behaviour::new(local_peer_id);
+        let ping = ping::Behaviour::new(ping::Config::new());
 
         let behaviour = EnclaveNetworkBehaviour {
             gossipsub,
             request_response,
             relay_client,
-            dcutr
+            dcutr,
+            ping
         };
 
         let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
@@ -122,7 +125,7 @@ impl P2PNode {
             .map_err(|err| anyhow::anyhow!("Error adding relay transport to swarm: {err}"))?
             .with_behaviour(|_| behaviour)
             .map_err(|err| anyhow::anyhow!("Error adding behaviour to swarm: {err}"))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
             .build();
 
         swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
@@ -140,6 +143,7 @@ impl P2PNode {
 
         if let Some(relay_str) = relay_address {
             if let Ok(addr) = relay_str.parse::<Multiaddr>() {
+                log::info!("Connecting to relay: {}", addr);
                 println!("Connecting to relay: {}", addr);
                 swarm.dial(addr.clone())?;
                 *relay_addr_clone.lock().await = Some(addr);
@@ -150,6 +154,7 @@ impl P2PNode {
         let first_address = loop {
             match swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => {
+                    log::info!("Listening on {address}");
                     println!("Listening on {address}");
                     break address;
                 },
@@ -161,6 +166,7 @@ impl P2PNode {
 
         tokio::spawn(async move {
             let mut friend_list: Vec<PeerId> = Vec::new();
+            let mut pending_friend_requests: HashMap<PeerId, FriendRequest> = HashMap::new();
 
             loop {
                 tokio::select! {
@@ -178,52 +184,101 @@ impl P2PNode {
                                 }
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::RequestResponse(req_event)) => {
-                                if let reqres::Event::Message { peer, message, .. } = req_event {
-                                    if let reqres::Message::Request { request, .. } = message {
-                                        match request {
-                                            P2PMessage::FriendRequest(req) => {
-                                                let _ = event_sender.send(P2PEvent::FriendRequestReceived {
-                                                    from: peer,
-                                                    request: req
-                                                });
-                                            },
-                                            P2PMessage::FriendRequestResponse(response) => {
-                                                if response.accepted {
-                                                    if !friend_list.contains(&peer) {
-                                                        friend_list.push(peer);
-                                                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
+                                match req_event {
+                                    reqres::Event::Message { peer, message, .. } => {
+                                        match message {
+                                            reqres::Message::Request { request, channel, .. } => {
+                                                match request {
+                                                    P2PMessage::FriendRequest(req) => {
+                                                        log::info!("Received friend request from {}: {}", peer, req.message);
+                                                        println!("Received friend request from {}: {}", peer, req.message);
+                                                        let _ = event_sender.send(P2PEvent::FriendRequestReceived {
+                                                            from: peer,
+                                                            request: req.clone()
+                                                        });
+
+                                                        // Send back an empty acknowledgement so the request doesn't hang
+                                                        // But don't auto-accept - wait for user action
+                                                        let ack = P2PMessage::DirectMessage(DirectMessage {
+                                                            from: "system".into(),
+                                                            content: "request_received".into(),
+                                                            timestamp: 0
+                                                        });
+
+                                                        let _ = swarm.behaviour_mut().request_response.send_response(channel, ack);
+                                                    },
+                                                    P2PMessage::FriendRequestResponse(response) => {
+                                                        log::info!("Received friend request response from {}: accepted={}", peer, response.accepted);
+                                                        println!("Received friend request response from {}: accepted={}", peer, response.accepted);
+                                                        if response.accepted {
+                                                            if !friend_list.contains(&peer) {
+                                                                friend_list.push(peer);
+                                                                swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
+                                                            }
+                                                            let _ = event_sender.send(P2PEvent::FriendRequestAccepted { peer });
+                                                        }
+                                                        else {
+                                                            let _ = event_sender.send(P2PEvent::FriendRequestDenied { peer });
+                                                        }
+                                                    },
+                                                    P2PMessage::DirectMessage(msg) => {
+                                                        if msg.from == "system" {
+                                                            return;
+                                                        }
+
+                                                        if !friend_list.contains(&peer) {
+                                                            log::info!("Ignoring DM from non-friend: {}", peer);
+                                                            println!("Ignoring DM from non-friend: {}", peer);
+                                                            return;
+                                                        }
+
+                                                        let _ = event_sender.send(P2PEvent::MessageReceived(msg));
                                                     }
-                                                    let _ = event_sender.send(P2PEvent::FriendRequestAccepted { peer });
-                                                }
-                                                else {
-                                                    let _ = event_sender.send(P2PEvent::FriendRequestDenied { peer });
                                                 }
                                             },
-                                            P2PMessage::DirectMessage(msg) => {
-                                                if !friend_list.contains(&peer) {
-                                                    continue;
-                                                }
-                                                let _ = event_sender.send(P2PEvent::MessageReceived(msg));
+                                            reqres::Message::Response { request_id, response } => {
+                                                log::info!("Received response for request {:?}: {:?}", request_id, response);
+                                                println!("Received response for request {:?}: {:?}", request_id, response);
                                             }
                                         }
-                                    }
+                                    },
+                                    reqres::Event::OutboundFailure { peer, request_id, error, .. } => {
+                                        log::info!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
+                                        println!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
+                                    },
+                                    reqres::Event::InboundFailure { peer, request_id, error, .. } => {
+                                        log::info!("Inbound request {:?} to {} failed {:?}", request_id, peer, error);
+                                        println!("Inbound request {:?} to {} failed {:?}", request_id, peer, error);
+                                    },
+                                    _ => {}
                                 }
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::RelayClient(event)) => {
+                                log::info!("Relay client event: {:?}", event);
                                 println!("Relay client event: {:?}", event);
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::Dcutr(event)) => {
-                                println!("DCUTR event {:?}", event);
-                            }
+                                log::info!("DCUTR event {:?}", event);
+                            },
+                            SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::Ping(event)) => {
+                                log::info!("Ping event {:?}", event);
+                            },
                             SwarmEvent::NewListenAddr { address, .. } => {
-                                println!("Listening on {address}");
+                                log::info!("Listening on {address}");
                                 listen_addresses_clone.lock().await.push(address);
                             },
                             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                                println!("Connected to peer: {peer_id}");
+                                log::info!("Connected to peer: {peer_id}");
                                 let _ = event_sender.send(P2PEvent::PeerConnected(peer_id));
+
+                                if let Some(pending_request) = pending_friend_requests.remove(&peer_id) {
+                                    log::info!("Sending buffered friend request to {}", peer_id);
+                                    let request = P2PMessage::FriendRequest(pending_request);
+                                    swarm.behaviour_mut().request_response.send_request(&peer_id, request);
+                                }
                             },
                             SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                log::info!("Disconnected from peer: {peer_id}");
                                 println!("Disconnected from peer: {peer_id}");
                                 let _ = event_sender.send(P2PEvent::PeerDisconnected(peer_id));
                             },
@@ -269,7 +324,8 @@ impl P2PNode {
                                 }
                             },
                             SwarmCommand::SendFriendRequest { peer, address, message } => {
-                                let _ = swarm.dial(address);
+                                log::info!("Buffering friend request to: {peer} at: {address}");
+
                                 let local_addresses = listen_addresses_clone.lock().await;
                                 let relay_addr_opt = relay_addr_clone.lock().await;
 
@@ -279,16 +335,22 @@ impl P2PNode {
                                     local_addresses.first().map(|a| a.to_string()).unwrap_or_default()
                                 };
 
-                                let request = P2PMessage::FriendRequest(
-                                    FriendRequest {
-                                        from_peer_id: swarm.local_peer_id().to_string(),
-                                        from_multiaddr: address_to_send,
-                                        message
-                                    }
-                                );
-                                swarm.behaviour_mut().request_response.send_request(&peer, request);
+                                let request = FriendRequest {
+                                    from_peer_id: swarm.local_peer_id().to_string(),
+                                    from_multiaddr: address_to_send,
+                                    message
+                                };
+
+                                pending_friend_requests.insert(peer, request);
+
+                                if let Err(err) = swarm.dial(address) {
+                                    log::error!("Failed to dial peer {}: {}", peer, err);
+                                    pending_friend_requests.remove(&peer);
+                                }
                             },
                             SwarmCommand::AcceptFriendRequest(peer) => {
+                                log::info!("Accepting friend request from: {}", peer);
+                                println!("Accepting friend request from: {}", peer);
                                 if !friend_list.contains(&peer) {
                                     friend_list.push(peer);
                                     swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
@@ -323,6 +385,7 @@ impl P2PNode {
                                 let _ = sender.send(friend_list.clone());
                             },
                             SwarmCommand::ConnectToRelay(address) => {
+                                log::info!("Connecting to relay: {}", address);
                                 println!("Connecting to relay: {}", address);
                                 let _ = swarm.dial(address.clone());
                                 *relay_addr_clone.lock().await = Some(address);

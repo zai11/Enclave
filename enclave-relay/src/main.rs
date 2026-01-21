@@ -1,10 +1,25 @@
+use std::{fs, path::Path};
+
 use libp2p::{
     PeerId, SwarmBuilder, futures::StreamExt, identity, noise, relay, swarm::SwarmEvent, tcp, yamux
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let local_key = identity::Keypair::generate_ed25519();
+    let key_file = "relay_key.bin";
+
+    let local_key = if Path::new(key_file).exists() {
+        println!("Loading existing keypair...");
+        let bytes = fs::read(key_file)?;
+        identity::Keypair::from_protobuf_encoding(&bytes)?
+    } else {
+        println!("Generating new keypair...");
+        let key = identity::Keypair::generate_ed25519();
+        let bytes = key.to_protobuf_encoding()?;
+        fs::write(key_file, bytes)?;
+        key
+    };
+
     let local_peer_id = PeerId::from(local_key.public());
 
     println!("Relay Peer ID: {}", local_peer_id);

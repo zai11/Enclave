@@ -1,27 +1,40 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod logger;
 mod p2p;
 
+use chrono::Utc;
+use log::LevelFilter;
 use p2p::{P2PNode, P2PEvent, FriendInfo};
 use tauri::Emitter;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use libp2p::{PeerId, Multiaddr};
 
+use crate::logger::Logger;
+
+static LOGGER: once_cell::sync::Lazy<Logger> =
+    once_cell::sync::Lazy::new(|| {
+        let date_string = Utc::now().format("%Y%m%d").to_string();
+        Logger::new(format!("./logs/{date_string}.log").as_str(), LevelFilter::Info).expect("failed to create logger")
+    });
+
 struct AppState {
-    p2p_node: Arc<Mutex<Option<P2PNode>>>
+    p2p_node: Arc<Mutex<Option<P2PNode>>>,
 }
 
 #[tauri::command]
 async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> Result<String, String> {
-    // For now, we are hardcoding a relay server ip:
-    // Format: /ip4/SERVER_IP/tcp/4001/p2p/RELAY_PEER_ID
-    let relay_address = Some("/ip4/127.0.0.1/tcp/4001".to_string());
+    let relay_address = None;
 
-    let (node, mut event_receiver) = P2PNode::new(relay_address)
-        .await
-        .map_err(|err| err.to_string())?;
+    let (node, mut event_receiver) = match P2PNode::new(relay_address).await {
+        Ok((node, event_receiver)) => (node, event_receiver),
+        Err(err) => {
+            log::error!("start_p2p: {err}");
+            return Err(err.to_string());
+        }
+    };
 
     let peer_id = node.get_peer_id().to_string();
 
@@ -58,25 +71,32 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
 #[tauri::command]
 async fn get_my_info(state: tauri::State<'_, AppState>) -> Result<FriendInfo, String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        let peer_id = node.get_peer_id().to_string();
-        let addresses = node.get_listen_addresses().await;
 
-        let multiaddr = addresses
-            .first()
-            .ok_or("No listening addresses")?
-            .to_string();
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("get_my_info called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
 
-        Ok(
-            FriendInfo {
-                peer_id,
-                multiaddr
-            }
-        )
-    }
-    else {
-        Err("P2P node not started".into())
-    }
+    let addresses = node.get_listen_addresses().await;
+
+    let multiaddr = match addresses.first() {
+        Some(addr) => addr.to_string(),
+        None => {
+            log::error!(
+                "get_my_info: node {} has no listening addresses",
+                node.get_peer_id()
+            );
+            return Err("No listening addresses".into());
+        }
+    };
+
+    Ok(FriendInfo {
+        peer_id: node.get_peer_id().to_string(),
+        multiaddr,
+    })
 }
 
 #[tauri::command]
@@ -87,93 +107,220 @@ async fn send_friend_request(
     message: String
 ) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        let peer = peer_id.parse::<PeerId>().map_err(|err| err.to_string())?;
-        let address = multiaddr.parse::<Multiaddr>().map_err(|err| err.to_string())?;
-        node.send_friend_request(peer, address, message).map_err(|err| err.to_string())?;
-        Ok(())
-    }
-    else {
-        Err("P2P node not started".into())
-    }
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("send_friend_request called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let peer = match peer_id.parse::<PeerId>() {
+        Ok(peer) => peer,
+        Err(err) => {
+            log::error!("send_friend_request: {}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let address = match multiaddr.parse::<Multiaddr>(){
+        Ok(address) => address,
+        Err(err) => {
+            log::error!("send_friend_request: {}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let _ = match node.send_friend_request(peer, address, message) {
+        Ok(_) => (),
+        Err(err) => {
+            log::error!("send_friend_request: {}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(())
 }
 
 #[tauri::command]
 async fn accept_friend_request(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        let peer = peer_id.parse::<PeerId>().map_err(|err| err.to_string())?;
-        node.accept_friend_request(peer).map_err(|err| err.to_string())?;
-        Ok(())
-    }
-    else {
-        Err("P2P node not started".into())
-    }
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("accept_friend_request called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let peer = match peer_id.parse::<PeerId>() {
+        Ok(peer) => peer,
+        Err(err) => {
+            log::error!("accept_friend_request: {}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let _ = match node.accept_friend_request(peer) {
+        Ok(_) => (),
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(())
 }
 
 #[tauri::command]
 async fn deny_friend_request(state: tauri::State<'_, AppState>, peer_id: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        let peer = peer_id.parse::<PeerId>().map_err(|err| err.to_string())?;
-        node.deny_friend_request(peer).map_err(|err| err.to_string())?;
-        Ok(())
-    }
-    else {
-        Err("P2P node not started".into())
-    }
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("deny_friend_request called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let peer = match peer_id.parse::<PeerId>() {
+        Ok(peer) => peer,
+        Err(err) => {
+            log::error!("deny_friend_request: {}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let _ = match node.deny_friend_request(peer) {
+        Ok(_) => (),
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(())
 }
 
 #[tauri::command]
 async fn send_message(state: tauri::State<'_, AppState>, content: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        node.send_message(content).map_err(|err| err.to_string())?;
-    }
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("send_message called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let _ = match node.send_message(content) {
+        Ok(_) => (),
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
     Ok(())
 }
 
 #[tauri::command]
 async fn send_direct_message(state: tauri::State<'_, AppState>, peer_id: String, content: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        let peer = peer_id.parse::<PeerId>().map_err(|err| err.to_string())?;
-        node.send_direct_message(peer, content).map_err(|err| err.to_string())?;
-        Ok(())
-    }
-    else {
-        Err("P2P node not started".into())
-    }
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("send_direct_message called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let peer = match peer_id.parse::<PeerId>() {
+        Ok(peer) => peer,
+        Err(err) => {
+            log::error!("send_direct_message: {}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let _ = match node.send_direct_message(peer, content) {
+        Ok(_) => (),
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+    
+    Ok(())
 }
 
 #[tauri::command]
 async fn get_friend_list(state: tauri::State<'_, AppState>) -> Result<Vec<String>, String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        let friends = node.get_friend_list().await.map_err(|err| err.to_string())?;
-        Ok(friends.iter().map(|p| p.to_string()).collect())
-    }
-    else {
-        Err("P2P node not started".to_string())
-    }
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("get_friend_list called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let friends = match node.get_friend_list().await {
+        Ok(friends) => friends,
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(friends.iter().map(|p| p.to_string()).collect())
 }
 
 #[tauri::command]
 async fn connect_to_relay(state: tauri::State<'_, AppState>, relay_address: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
-    if let Some(node) = node_guard.as_ref() {
-        let address = relay_address.parse::<Multiaddr>().map_err(|err| err.to_string())?;
-        node.connect_to_relay(address).map_err(|err| err.to_string())?;
-        Ok(())
-    }
-    else {
-        Err("P2P node not started".to_string())
-    }
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("connect_to_relay called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let address = match relay_address.parse::<Multiaddr>() {
+        Ok(address) => address,
+        Err(err) => {
+            log::error!("connect_to_relay: {}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let _ = match node.connect_to_relay(address) {
+        Ok(_) => (),
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 fn main() {
-    tauri::Builder::default()
+    log::set_logger(&*LOGGER).unwrap();
+    log::set_max_level(log::LevelFilter::Info);
+    
+    log::info!("Application Started");
+
+    if let Err(err) = tauri::Builder::default()
         .manage(AppState {
             p2p_node: Arc::new(Mutex::new(None))
         })
@@ -189,6 +336,7 @@ fn main() {
             get_friend_list,
             connect_to_relay
         ])
-        .run(tauri::generate_context!())
-        .expect("Error while running tauri application");
+        .run(tauri::generate_context!()) {
+            log::error!("Error while running tauri application: {}", err.to_string());
+        }
 }

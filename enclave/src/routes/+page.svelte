@@ -30,9 +30,11 @@
   let addFriendPeerId = '';
   let addFriendAddress = '';
   let addFriendMessage = '';
+  let relayAddress = '';
   let isStarted = false;
   let showAddFriend = false;
   let showFriendRequests = false;
+  let showRelaySettings = false;
 
   onMount(async () => {
     if (!("__TAURI_INTERNALS__" in window)) {
@@ -58,9 +60,16 @@
     });
 
     await listen('friend-request-received', (event: any) => {
-      const [peerId, request] = event.payload as [string, FriendRequest];
-      pendingRequests = [...pendingRequests, {peerId, request}];
-      showFriendRequests = true;
+      console.log('Friend request received event:', event.payload);
+      const [ peerId, request ] = event.payload;
+      console.log('Parsed - peerId:', peerId, 'request:', request);
+      if (!pendingRequests.some(r => r.peerId === peerId)) {
+        pendingRequests = [...pendingRequests, {peerId, request}];
+        showFriendRequests = true;
+        console.log('Added to pending requests. Total:', pendingRequests.length);
+      } else {
+        console.log('Request already exists in pending list.');
+      }
     });
 
     await listen('friend-request-accepted', async (event: any) => {
@@ -76,17 +85,30 @@
 
   async function startP2P() {
     try {
-      console.log("Called 1");
       myPeerId = await invoke<string>('start_p2p');
-      console.log("Called 2");
       myInfo = await invoke<FriendInfo>('get_my_info');
-      console.log("Called 3");
       isStarted = true;
-      console.log("Called 4");
     }
     catch (error) {
       console.error('Failed to start P2P:', error);
       alert('Failed to start P2P: ' + error);
+    }
+  }
+
+  async function connectRelay() {
+    if (!relayAddress.trim()) {
+      alert('Please enter a relay address');
+      return;
+    }
+
+    try {
+      await invoke('connect_to_relay', {relayAddress});
+      showRelaySettings = false;
+      alert('Connected to relay successfully!');
+      myInfo = await invoke<FriendInfo>('get_my_info');
+    } catch (error) {
+      console.log('Failed to connect to relay:', error);
+      alert('Failed to connect to relay: ' + error);
     }
   }
 
@@ -192,6 +214,7 @@
             <h3>My Info</h3>
             <p class="peer-id">{myPeerId.slice(0, 16)}...</p>
             <button on:click={copyMyInfo} class="btn-secondary">Copy Connection Info</button>
+            <button on:click={() => showRelaySettings = true} class="btn-secondary" style="margin-top: 8px;">Relay Settings</button>
           </div>
           <div class="friends">
             <h3>Friends ({friendList.length})</h3>
@@ -246,6 +269,29 @@
           </div>
         </div>
       </div>
+
+      <!-- Relay Settings Modal -->
+      {#if showRelaySettings}
+        <div class="modal-overlay">
+          <div class="modal">
+            <h2>Relay Server Settings</h2>
+            <p>Connect to a relay server to enable connections over the internet</p>
+            <label>
+              Relay Address
+              <input type="text" bind:value={relayAddress} placeholder="/ip4/127.0.0.1/tcp/4001/p2p/12D3Koo..." />
+            </label>
+            <div class="help-text">
+              <strong>Format:</strong> /ip4/IP_ADDRESS/tcp/PORT/p2p/PEER_ID
+              <br />
+              <string>Example:</string> /ip4/127.0.0.1/tcp/4001/p2p/12D3KooWABC...
+            </div>
+            <div class="modal-actions">
+              <button on:click={() => showRelaySettings = false} class="btn-secondary">Cancel</button>
+              <button on:click={connectRelay} class="btn-primary">Connect</button>
+            </div>
+          </div>
+        </div>
+      {/if}
 
       <!-- Send Friend Request Modal -->
       {#if showAddFriend}
@@ -582,5 +628,19 @@
 
   .request-actions button {
     flex: 1;
+  }
+
+  .help-text {
+    background-color: #f5f5f5;
+    padding: 12px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #666;
+    margin-top: 12px;
+    font-family: monospace;
+  }
+
+  .help-text strong {
+    color: #333;
   }
 </style>
