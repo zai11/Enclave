@@ -27,7 +27,6 @@
   let friendList: string[] = [];
   let pendingRequests: Array<{peerId: string, request: FriendRequest}> = [];
   let messageInput = '';
-  let addFriendPeerId = '';
   let addFriendAddress = '';
   let addFriendMessage = '';
   let relayAddress = '';
@@ -35,6 +34,12 @@
   let showAddFriend = false;
   let showFriendRequests = false;
   let showRelaySettings = false;
+  let contextMenuVisible = false;
+  let contextMenuX = 0;
+  let contextMenuY = 0;
+  let contextMenuPeer: string | null = null;
+  let showProfile = false;
+  let profilePeer: { peerId: string, isFriend: boolean } | null = null;
 
   onMount(async () => {
     if (!("__TAURI_INTERNALS__" in window)) {
@@ -125,18 +130,25 @@
   }
 
   async function sendFriendRequest() {
-    if (!addFriendPeerId.trim() || !addFriendAddress.trim()) {
-      alert('Please enter both peer ID and address');
+    if (!addFriendAddress.trim()) {
+      alert('Please enter friend connection address address');
       return;
     }
 
+    if (!validateMultiaddr(addFriendAddress)) {
+      alert('The provided address was invalid');
+      return;
+    }
+
+    const peerId = addFriendAddress.split('/p2p/')[1];
+    const multiaddr = addFriendAddress.split('/p2p/')[0];
+
     try {
       await invoke('send_friend_request', {
-        peerId: addFriendPeerId,
-        multiaddr: addFriendAddress,
+        peerId: peerId,
+        multiaddr: multiaddr,
         message: addFriendMessage || 'Hi, let\'s connect on Enclave!'
       });
-      addFriendPeerId = '';
       addFriendAddress = '';
       addFriendMessage = '';
       showAddFriend = false;
@@ -181,10 +193,28 @@
       console.error('Failed to get friend list:', error);
     }
   }
+  
+  async function handleViewProfile() {
+    if (contextMenuPeer) {
+      profilePeer = {
+        peerId: contextMenuPeer,
+        isFriend: friendList.includes(contextMenuPeer)
+      };
 
-  function copyMyInfo() {
+      showProfile = true;
+    }
+
+    hideContextMenu();
+  }
+
+  function copyPeerId(peerId: string) {
+    navigator.clipboard.writeText(peerId);
+    alert('Peer ID copied to clipboard!');
+  }
+
+  function copyMyAddress() {
     if (!myInfo) return;
-    const text = `enclave://add-friend?peer=${myInfo.peer_id}&addr=${myInfo.multiaddr}`;
+    const text = `${myInfo.multiaddr}/p2p/${myInfo.peer_id}`;
     navigator.clipboard.writeText(text);
     alert('Connection info copied to clipboard!');
   }
@@ -192,7 +222,62 @@
   function formatTime(timestamp: number) {
     return new Date(timestamp * 1000).toLocaleTimeString();
   }
+
+  function showContextMenu(event: MouseEvent, peerId: string) {
+    event.preventDefault();
+    contextMenuPeer = peerId;
+    contextMenuX = event.clientX;
+    contextMenuY = event.clientY;
+    contextMenuVisible = true;
+  }
+
+  function hideContextMenu() {
+    contextMenuPeer = null;
+    contextMenuVisible = false;
+  }
+
+  function handleRemoveFriend() {
+    if (contextMenuPeer) {
+      console.log('Remove friend:', contextMenuPeer);
+      // TODO: Implement remove friend functionality
+      alert(`Remove friend: ${contextMenuPeer.slice(0, 16)}...`);
+    }
+    hideContextMenu();
+  }
+
+  function handleBlockPeer() {
+    if (contextMenuPeer) {
+      console.log('Block peer:', contextMenuPeer);
+      // TODO: Implement peer block functionality
+      alert(`Block friend: ${contextMenuPeer.slice(0, 16)}...`);
+    }
+    hideContextMenu();
+  }
+
+  function handleClickOutside(event: Event) {
+    if (contextMenuVisible) {
+      hideContextMenu();
+    }
+  }
+
+  function validateMultiaddr(multiaddr: String): boolean {
+    const multiaddrRegex = /^\/ip4\/(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\/tcp\/([1-9]\d{0,4})\/p2p\/([A-Za-z0-9]+)$/
+    return multiaddr.match(multiaddrRegex) !== null
+  }
 </script>
+
+<svelte:window 
+  on:click={handleClickOutside} 
+  on:keydown={(e) => {
+    if (e.key === 'Escape') {
+      hideContextMenu();
+      showProfile = false;
+      showAddFriend = false;
+      showFriendRequests = false;
+      showRelaySettings = false;
+    }
+  }} 
+/>
 
 <main>
   <div class="container">
@@ -213,7 +298,7 @@
           <div class="my-info">
             <h3>My Info</h3>
             <p class="peer-id">{myPeerId.slice(0, 16)}...</p>
-            <button on:click={copyMyInfo} class="btn-secondary">Copy Connection Info</button>
+            <button on:click={copyMyAddress} class="btn-secondary">Copy Connection Info</button>
             <button on:click={() => showRelaySettings = true} class="btn-secondary" style="margin-top: 8px;">Relay Settings</button>
           </div>
           <div class="friends">
@@ -223,7 +308,7 @@
             {:else}
               <ul>
                 {#each friendList as friend}
-                  <li class="peer-item">{friend.slice(0, 16)}...</li>
+                  <li class="peer-item" on:contextmenu={(e) => showContextMenu(e, friend)}>{friend.slice(0, 16)}...</li>
                 {/each}
               </ul>
             {/if}
@@ -260,11 +345,21 @@
         </div>
       </div>
 
+      <!-- Context Menu -->
+      {#if contextMenuVisible}
+        <div class="context-menu" style="top: {contextMenuY}px; left: {contextMenuX}px;" on:click|stopPropagation on:keydown={(e) => e.key === 'Escape' && hideContextMenu()} role="menu" tabindex="-1">
+            <button class="context-menu-item" on:click={handleViewProfile}>View Profile</button>
+            <button class="context-menu-item" on:click={handleRemoveFriend}>Remove Friend</button>
+            <button class="context-menu-item danger" on:click={handleBlockPeer}>Block</button>
+        </div>
+      {/if}
+
       <!-- Relay Settings Modal -->
       {#if showRelaySettings}
-        <div class="modal-overlay">
-          <div class="modal">
-            <h2>Relay Server Settings</h2>
+        <div class="modal-overlay" on:click={() => showRelaySettings = false} on:keydown={(e) => e.key === 'Escape' && (showRelaySettings = false)} role="presentation">
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="relay-settings-modal-title" aria-modal="true" tabindex=0>
+            <h2 id="relay-settings-modal-title">Relay Server Settings</h2>
             <p>Connect to a relay server to enable connections over the internet</p>
             <label>
               Relay Address
@@ -285,21 +380,18 @@
 
       <!-- Send Friend Request Modal -->
       {#if showAddFriend}
-      <div class="modal-overlay">
-        <div class="modal">
-          <h2>Send Friend Request</h2>
+      <div class="modal-overlay" on:click={() => showAddFriend = false} on:keydown={(e) => e.key === 'Escape' && (showAddFriend = false)} role="presentation">
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="friend-request-modal-title" aria-modal="true" tabindex=0>
+          <h2 id="friend-request-modal-title">Send Friend Request</h2>
           <p>Enter your friend's connection information</p>
           <label>
-            Peer ID
-            <input type="text" bind:value={addFriendPeerId} placeholder="12D3KooW..." />
-          </label>
-          <label>
             Address
-            <input type="text" bind:value={addFriendAddress} placeholder="/ip4/192.168.1.100/tcp/54321" />
+            <input type="text" bind:value={addFriendAddress} placeholder="/ip4/192.168.1.100/tcp/54321/p2p/12D3KooWKNseoB5NSPVcxbPYL..." />
           </label>
           <label>
             Message
-            <input type="text" bind:value={addFriendMessage} placeholder="Hi, let\'s connect on Enclave!" />
+            <input type="text" bind:value={addFriendMessage} placeholder="Hi, let's connect on Enclave!" />
           </label>
           <div class="modal-actions">
             <button on:click={() => showAddFriend = false} class="btn-secondary">Cancel</button>
@@ -311,9 +403,10 @@
 
       <!-- Friend Requests Modal -->
       {#if showFriendRequests}
-        <div class="modal-overlay">
-          <div class="modal">
-            <h2>Friend Requests</h2>
+        <div class="modal-overlay" on:click={() => showFriendRequests = false} on:keydown={(e) => e.key === 'Escape' && (showFriendRequests = false)} role="presentation">
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="friend-requests-modal-title" aria-modal="true" tabindex=0>
+            <h2 id="friend-requests-modal-title">Friend Requests</h2>
             {#each pendingRequests as { peerId, request }}
               <div class="friend-request">
                 <p class="request-peer">{peerId.slice(0, 24)}...</p>
@@ -327,6 +420,46 @@
 
             <div class="modal-actions" style="margin-top: 24px;">
               <button on:click={() => showFriendRequests = false} class="btn-secondary">Close</button>
+            </div>
+          </div>
+        </div>
+      {/if}
+
+      <!-- Profile Modal -->
+      {#if showProfile && profilePeer}
+        <div class="modal-overlay" on:click={() => showProfile = false} on:keydown={(e) => e.key === 'Escape' && (showProfile = false)} role="presentation">
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="profile-modal-title" aria-modal="true" tabindex=0>
+            <h2 id="profile-modal-title">User Profile</h2>
+            <div class="profile-section">
+              <p>Peer ID</p>
+              <div class="profile-value">
+                <code class="peer-id-full">{profilePeer.peerId}</code>
+                <button on:click={() => copyPeerId(profilePeer!.peerId)} class="btn-icon" title="Copy Peer ID">📋</button>
+              </div>
+            </div>
+            <div class="profile-section">
+              <p>Status</p>
+              <div class="profile-value">
+                {#if profilePeer.isFriend}
+                  <span class="status-badge friend">Friend</span>
+                {:else}
+                  <span class="status-badge">Not a friend</span>
+                {/if}
+              </div>
+            </div>
+            <div class="profile-section">
+              <p>Connection Status</p>
+              <div class="profile-value">
+                {#if connectedPeers.includes(profilePeer.peerId)}
+                  <span class="status-badge connected">Connected</span>
+                {:else}
+                  <span class="status-badge disconnected">Disconnected</span>
+                {/if}
+              </div>
+            </div>
+            <div class="modal-actions">
+              <button on:click={() => showProfile = false} class="btn-secondary">Close</button>
             </div>
           </div>
         </div>
@@ -426,6 +559,12 @@
     margin-bottom: 4px;
     font-size: 12px;
     font-family: monospace;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+  
+  .peer-item:hover {
+    background-color: #e8e8e8;
   }
 
   .main-content {
@@ -632,5 +771,106 @@
 
   .help-text strong {
     color: #333;
+  }
+
+  .context-menu {
+    position: fixed;
+    background-color: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    padding: 4px 0;
+    min-width: 150px;
+    z-index: 10000;
+  }
+
+  .context-menu-item {
+    display: block;
+    width: 100%;
+    padding: 8px 16px;
+    background: none;
+    border: none;
+    text-align: left;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    color: #333;
+  }
+
+  .context-menu-item:hover {
+    background-color: #f5f5f5;
+  }
+
+  .context-menu-item.danger {
+    color: #ff3b30;
+  }
+
+  .context-menu-item.danger:hover {
+    background-color: #ffebee;
+  }
+
+  .profile-section {
+    margin-bottom: 20px;
+  }
+
+  .profile-section p {
+    display: block;
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 8px;
+    font-size: 14px;
+  }
+
+  .profile-value {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .peer-id-full {
+    font-family: monospace;
+    font-size: 11px;
+    background-color: #f5f5f5;
+    padding: 8px;
+    border-radius: 4px;
+    word-break: break-all;
+    flex: 1;
+  }
+
+  .btn-icon {
+    background: none;
+    border: 1px solid #ddd;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 16px;
+    transition: all 0.2s;
+  }
+
+  .btn-icon:hover {
+    background-color: #f5f5f5;
+    border-color: #ccc;
+  }
+
+  .status-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .status-badge.friend {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+  }
+
+  .status-badge.connected {
+    background-color: #e3f2fd;
+    color: #1976d2;
+  }
+
+  .status-badge.disconnected {
+    background-color: #fafafa;
+    color: #757575;
   }
 </style>
