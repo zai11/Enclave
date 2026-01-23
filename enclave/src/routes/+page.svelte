@@ -40,6 +40,9 @@
   let contextMenuPeer: string | null = null;
   let showProfile = false;
   let profilePeer: { peerId: string, isFriend: boolean } | null = null;
+  let nicknames = new Map<string, string>();
+  let editingPeer: string | null = null;
+  let draftNickname = '';
 
   onMount(async () => {
     if (!("__TAURI_INTERNALS__" in window)) {
@@ -260,9 +263,31 @@
     }
   }
 
-  function validateMultiaddr(multiaddr: String): boolean {
+  function validateMultiaddr(multiaddr: string): boolean {
     const multiaddrRegex = /^\/ip4\/(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\/tcp\/([1-9]\d{0,4})\/p2p\/([A-Za-z0-9]+)$/
     return multiaddr.match(multiaddrRegex) !== null
+  }
+
+  function updateNickname(newName: string) {
+    console.log('Updated nickname to: ' + newName);
+    if (editingPeer) {
+      if (newName === '' && nicknames.has(editingPeer)) {
+        nicknames.delete(editingPeer)
+      }
+      else {
+        nicknames.set(editingPeer, newName);
+      }
+    }
+  }
+
+  function displayName(peerId: string): string {
+    let name = nicknames.get(peerId) ?? peerId;
+    if (name.length > 16) {
+      return name.slice(0, 16) + '...';
+    }
+    else {
+      return name;
+    }
   }
 </script>
 
@@ -308,7 +333,33 @@
             {:else}
               <ul>
                 {#each friendList as friend}
-                  <li class="peer-item" on:contextmenu={(e) => showContextMenu(e, friend)}>{friend.slice(0, 16)}...</li>
+                  <li class="peer-item" 
+                    on:dblclick={() => {
+                      editingPeer = friend;
+                      draftNickname = nicknames.get(friend) ?? friend;
+                    }} 
+                    on:contextmenu={(e) => showContextMenu(e, friend)}
+                  >
+                    {#if editingPeer === friend}
+                      <input bind:value={draftNickname} 
+                        on:blur={() => {
+                          updateNickname(draftNickname.trim());
+                          editingPeer = null;
+                        }}
+                        on:keydown={(e) => {
+                          if (e.key === 'Enter') {
+                            updateNickname(draftNickname.trim());
+                            editingPeer = null;
+                          }
+                          if (e.key === 'Escape') {
+                            editingPeer = null;
+                          }
+                        }}
+                      />
+                    {:else}
+                      {displayName(friend)}
+                    {/if}
+                  </li>
                 {/each}
               </ul>
             {/if}
@@ -565,6 +616,10 @@
   
   .peer-item:hover {
     background-color: #e8e8e8;
+  }
+
+  .peer-item input {
+    width: 100%;
   }
 
   .main-content {
