@@ -7,19 +7,21 @@ mod p2p;
 
 use chrono::Utc;
 use log::LevelFilter;
-use p2p::{P2PNode, P2PEvent, FriendInfo};
+use p2p::{P2PNode, P2PEvent};
 use tauri::Emitter;
 use tokio::sync::Mutex;
 use std::sync::Arc;
 use libp2p::{PeerId, Multiaddr};
 
-use crate::logger::Logger;
+use crate::{logger::Logger, p2p::MyInfo};
 
 static LOGGER: once_cell::sync::Lazy<Logger> =
     once_cell::sync::Lazy::new(|| {
         let date_string = Utc::now().format("%Y%m%d").to_string();
         Logger::new(format!("./logs/{date_string}.log").as_str(), LevelFilter::Info).expect("failed to create logger")
     });
+
+
 
 struct AppState {
     p2p_node: Arc<Mutex<Option<P2PNode>>>,
@@ -37,9 +39,22 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
         }
     };
 
-    let peer_id = node.get_peer_id().to_string();
-
     *state.p2p_node.lock().await = Some(node);
+
+    log::info!("Called.");
+
+    let MyInfo{peer_id, keypair, ..} = match get_my_info(state.clone()).await {
+        Ok(info) => info,
+        Err(err) => {
+            log::error!("start_p2p: {err}");
+            return Err(err);
+        }
+    };
+
+    if let Err(err) = db::create_identity(db::DATABASE.clone(), keypair.clone(), peer_id.clone()) {
+        log::error!("start_p2p: {}", err.to_string());
+        return Err(err.to_string());
+    }
 
     tokio::spawn(async move {
         while let Some(event) = event_receiver.recv().await {
@@ -70,7 +85,7 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
 }
 
 #[tauri::command]
-async fn get_my_info(state: tauri::State<'_, AppState>) -> Result<FriendInfo, String> {
+async fn get_my_info(state: tauri::State<'_, AppState>) -> Result<MyInfo, String> {
     let node_guard = state.p2p_node.lock().await;
 
     let node = match node_guard.as_ref() {
@@ -94,8 +109,12 @@ async fn get_my_info(state: tauri::State<'_, AppState>) -> Result<FriendInfo, St
         }
     };
 
-    Ok(FriendInfo {
+    let keypair = node.get_keypair().to_protobuf_encoding()
+        .map_err(|err| err.to_string())?;
+
+    Ok(MyInfo {
         peer_id: node.get_peer_id().to_string(),
+        keypair,
         multiaddr,
     })
 }
