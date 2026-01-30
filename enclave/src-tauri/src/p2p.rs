@@ -81,17 +81,17 @@ pub struct P2PNode {
 impl P2PNode {
     pub async fn new(relay_address: Option<String>) -> anyhow::Result<(Self, mpsc::UnboundedReceiver<P2PEvent>)> {
         let (keypair, peer_id) = {
-            /*if let Ok(identity_data) = db::fetch_identity(db::DATABASE.clone()) {
+            if let Ok(identity_data) = db::fetch_identity(db::DATABASE.clone()) {
                 let local_key = Keypair::from_protobuf_encoding(&identity_data.keypair)?;
                 let peer_id = PeerId::from_str(&identity_data.peer_id)?;
                 (local_key, peer_id)
             }
-            else {*/
+            else {
                 let keypair = identity::Keypair::generate_ed25519();
                 let peer_id = PeerId::from(keypair.clone().public());
 
                 (keypair, peer_id)
-            //}
+            }
         };
 
         log::info!("Local peer id: {peer_id}");

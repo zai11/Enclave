@@ -41,8 +41,6 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
 
     *state.p2p_node.lock().await = Some(node);
 
-    log::info!("Called.");
-
     let MyInfo{peer_id, keypair, ..} = match get_my_info(state.clone()).await {
         Ok(info) => info,
         Err(err) => {
@@ -50,11 +48,6 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
             return Err(err);
         }
     };
-
-    if let Err(err) = db::create_identity(db::DATABASE.clone(), keypair.clone(), peer_id.clone()) {
-        log::error!("start_p2p: {}", err.to_string());
-        return Err(err.to_string());
-    }
 
     tokio::spawn(async move {
         while let Some(event) = event_receiver.recv().await {
