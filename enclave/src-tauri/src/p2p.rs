@@ -160,7 +160,6 @@ impl P2PNode {
         if let Some(relay_str) = relay_address {
             if let Ok(addr) = relay_str.parse::<Multiaddr>() {
                 log::info!("Connecting to relay: {}", addr);
-                println!("Connecting to relay: {}", addr);
                 swarm.dial(addr.clone())?;
                 *relay_addr_clone.lock().await = Some(addr);
             }
@@ -171,7 +170,6 @@ impl P2PNode {
             match swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     log::info!("Listening on {address}");
-                    println!("Listening on {address}");
                     break address;
                 },
                 _ => continue,
@@ -207,7 +205,6 @@ impl P2PNode {
                                                 match request {
                                                     P2PMessage::FriendRequest(req) => {
                                                         log::info!("Received friend request from {}: {}", peer, req.message);
-                                                        println!("Received friend request from {}: {}", peer, req.message);
                                                         let _ = event_sender.send(P2PEvent::FriendRequestReceived {
                                                             from: peer,
                                                             request: req.clone()
@@ -225,7 +222,6 @@ impl P2PNode {
                                                     },
                                                     P2PMessage::FriendRequestResponse(response) => {
                                                         log::info!("Received friend request response from {}: accepted={}", peer, response.accepted);
-                                                        println!("Received friend request response from {}: accepted={}", peer, response.accepted);
                                                         if response.accepted {
                                                             if !friend_list.contains(&peer) {
                                                                 friend_list.push(peer);
@@ -244,7 +240,6 @@ impl P2PNode {
 
                                                         if !friend_list.contains(&peer) {
                                                             log::info!("Ignoring DM from non-friend: {}", peer);
-                                                            println!("Ignoring DM from non-friend: {}", peer);
                                                             return;
                                                         }
 
@@ -254,24 +249,20 @@ impl P2PNode {
                                             },
                                             reqres::Message::Response { request_id, response } => {
                                                 log::info!("Received response for request {:?}: {:?}", request_id, response);
-                                                println!("Received response for request {:?}: {:?}", request_id, response);
                                             }
                                         }
                                     },
                                     reqres::Event::OutboundFailure { peer, request_id, error, .. } => {
                                         log::info!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
-                                        println!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
                                     },
                                     reqres::Event::InboundFailure { peer, request_id, error, .. } => {
                                         log::info!("Inbound request {:?} to {} failed {:?}", request_id, peer, error);
-                                        println!("Inbound request {:?} to {} failed {:?}", request_id, peer, error);
                                     },
                                     _ => {}
                                 }
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::RelayClient(event)) => {
                                 log::info!("Relay client event: {:?}", event);
-                                println!("Relay client event: {:?}", event);
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::Dcutr(event)) => {
                                 log::info!("DCUTR event {:?}", event);
@@ -295,7 +286,6 @@ impl P2PNode {
                             },
                             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                                 log::info!("Disconnected from peer: {peer_id}");
-                                println!("Disconnected from peer: {peer_id}");
                                 let _ = event_sender.send(P2PEvent::PeerDisconnected(peer_id));
                             },
                             _ => {}
@@ -366,7 +356,6 @@ impl P2PNode {
                             },
                             SwarmCommand::AcceptFriendRequest(peer) => {
                                 log::info!("Accepting friend request from: {}", peer);
-                                println!("Accepting friend request from: {}", peer);
                                 if !friend_list.contains(&peer) {
                                     friend_list.push(peer);
                                     swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
@@ -402,7 +391,6 @@ impl P2PNode {
                             },
                             SwarmCommand::ConnectToRelay(address) => {
                                 log::info!("Connecting to relay: {}", address);
-                                println!("Connecting to relay: {}", address);
                                 let _ = swarm.dial(address.clone());
                                 *relay_addr_clone.lock().await = Some(address);
                             }

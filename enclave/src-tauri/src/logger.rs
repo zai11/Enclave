@@ -40,10 +40,6 @@ impl log::Log for Logger {
             Err(poisoned) => poisoned.into_inner(),
         };
 
-        
-        println!("Called");
-        println!("Writing: [{}] {}", record.level(), record.args());
-
         let _ = writeln!(
             writer,
             "[{}] {}",
