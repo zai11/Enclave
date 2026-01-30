@@ -1,14 +1,18 @@
-use std::{str::FromStr, sync::{Arc, Mutex}};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use libp2p::{Multiaddr, PeerId};
 use rusqlite::Connection;
 
 use crate::db::models::{blocked_user::BlockedUser, direct_message::DirectMessage, friend::Friend, identity::Identity, nickname::Nickname, post::Post, user::User};
 
 pub mod models;
 
-pub fn init_db(path: String) -> anyhow::Result<Arc<Mutex<Connection>>> {
+pub static DATABASE: once_cell::sync::Lazy<Arc<std::sync::Mutex<Connection>>> =
+    once_cell::sync::Lazy::new(|| {
+        init_db("./enclave.db").unwrap()
+    });
+
+pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
     log::info!("Initilising database...");
 
     let db = Connection::open(path)?;
@@ -110,13 +114,13 @@ pub fn fetch_identity(db: Arc<Mutex<Connection>>) -> anyhow::Result<Identity> {
         Identity::new(
             id, 
             keypair, 
-            PeerId::from_str(&peer_id)?, 
+            peer_id, 
             DateTime::parse_from_rfc3339(&created_at)?.to_utc()
         )
     )
 }
 
-pub fn create_identity(db: Arc<Mutex<Connection>>, keypair: Vec<u8>, peer_id: PeerId) -> anyhow::Result<()> {
+pub fn create_identity(db: Arc<Mutex<Connection>>, keypair: Vec<u8>, peer_id: String) -> anyhow::Result<()> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
@@ -126,7 +130,7 @@ pub fn create_identity(db: Arc<Mutex<Connection>>, keypair: Vec<u8>, peer_id: Pe
         "INSERT INTO tbl_identity (keypair, peer_id, created_at) VALUES (?1, ?2, ?3)", 
         rusqlite::params![
             keypair,
-            peer_id.to_string(),
+            peer_id,
             created_at.to_rfc3339()
         ]
     )?;
@@ -151,13 +155,13 @@ pub fn fetch_user_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Result<U
     Ok(
         User::new(
             id, 
-            PeerId::from_str(&peer_id)?, 
-            Multiaddr::from_str(&multiaddr)?
+            peer_id, 
+            multiaddr
         )
     )
 }
 
-pub fn fetch_user_by_peer_id(db: Arc<Mutex<Connection>>, peer_id: PeerId) -> anyhow::Result<User> {
+pub fn fetch_user_by_peer_id(db: Arc<Mutex<Connection>>, peer_id: String) -> anyhow::Result<User> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
@@ -174,13 +178,13 @@ pub fn fetch_user_by_peer_id(db: Arc<Mutex<Connection>>, peer_id: PeerId) -> any
     Ok(
         User::new(
             id, 
-            PeerId::from_str(&peer_id)?, 
-            Multiaddr::from_str(&multiaddr)?
+            peer_id, 
+            multiaddr
         )
     )
 }
 
-pub fn create_user(db: Arc<Mutex<Connection>>, peer_id: PeerId, multiaddr: Multiaddr) -> anyhow::Result<()> {
+pub fn create_user(db: Arc<Mutex<Connection>>, peer_id: String, multiaddr: String) -> anyhow::Result<()> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
@@ -192,7 +196,7 @@ pub fn create_user(db: Arc<Mutex<Connection>>, peer_id: PeerId, multiaddr: Multi
     Ok(())
 }
 
-pub fn update_user(db: Arc<Mutex<Connection>>, id: i64, multiaddr: Multiaddr) -> anyhow::Result<()> {
+pub fn update_user(db: Arc<Mutex<Connection>>, id: i64, multiaddr: String) -> anyhow::Result<()> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
@@ -788,17 +792,13 @@ pub mod test {
         let db = init_db(":memory:".into()).expect("db init failed");
 
         let keypair1 = vec![1u8, 2, 3];
-        let peer_id1 = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
 
-        create_identity(db.clone(), keypair1, peer_id1)
+        create_identity(db.clone(), keypair1, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into())
             .expect("first create_identity failed");
 
         let keypair2 = vec![9u8, 8, 7];
-        let peer_id2 = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
 
-        let second_result = create_identity(db.clone(), keypair2, peer_id2);
+        let second_result = create_identity(db.clone(), keypair2, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into());
 
         assert!(second_result.is_err(), "expected create_identity to fail on second insert");
     }
@@ -808,10 +808,8 @@ pub mod test {
         let db = init_db(":memory:".into()).expect("db init failed");
 
         let keypair = vec![10u8, 20, 30, 40];
-        let peer_id = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
 
-        let result = create_identity(db.clone(), keypair.clone(), peer_id.clone());
+        let result = create_identity(db.clone(), keypair.clone(), "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into());
 
         assert!(result.is_ok(), "create_identity failed");
 
@@ -819,7 +817,7 @@ pub mod test {
 
         assert_eq!(identity.id, 1);
         assert_eq!(identity.keypair, keypair);
-        assert_eq!(identity.peer_id, peer_id);
+        assert_eq!(identity.peer_id, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string());
     }
 
     #[test]
@@ -835,18 +833,16 @@ pub mod test {
     pub fn test_fetch_user_by_id_correctly_fetches_user_data() {
         let db = init_db(":memory:".into()).expect("db init failed");
 
-        let peer_id = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
-        let multiaddr = Multiaddr::from_str("/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid multiaddr");
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
         let user_id = {
             let conn = db.lock().unwrap();
 
             conn.execute(
                 "INSERT INTO tbl_users (peer_id, multiaddr) VALUES (?1, ?2);",
-                rusqlite::params![peer_id.to_string(), multiaddr.to_string()]
+                rusqlite::params![peer_id, multiaddr]
             ).expect("insert user failed");
 
             conn.last_insert_rowid()
@@ -863,8 +859,7 @@ pub mod test {
     pub fn test_fetch_user_by_peer_id_errors_invalid_peer_id() {
         let db = init_db(":memory:".into()).expect("db init failed");
 
-        let peer_id = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
         let result = fetch_user_by_peer_id(db, peer_id);
 
@@ -875,24 +870,21 @@ pub mod test {
     pub fn test_fetch_user_by_peer_id_correctly_fetches_user_data() {
         let db = init_db(":memory:".into()).expect("db init failed");
 
-        let peer_id = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
-
-        let multiaddr = Multiaddr::from_str("/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid multiaddr");
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
         let user_id = {
             let conn = db.lock().unwrap();
 
             conn.execute(
                 "INSERT INTO tbl_users (peer_id, multiaddr) VALUES (?1, ?2);",
-                rusqlite::params![peer_id.to_string(), multiaddr.to_string()]
+                rusqlite::params![peer_id.clone(), multiaddr.clone()]
             ).expect("insert user failed");
 
             conn.last_insert_rowid()
         };
 
-        let user = fetch_user_by_peer_id(db, peer_id).expect("fetch_user_by_peer_id failed");
+        let user = fetch_user_by_peer_id(db, peer_id.clone()).expect("fetch_user_by_peer_id failed");
 
         assert_eq!(user.id, user_id);
         assert_eq!(user.peer_id, peer_id);
@@ -903,16 +895,13 @@ pub mod test {
     pub fn test_create_user_correctly_inserts_user_data() {
         let db = init_db(":memory:".into()).expect("db init failed");
 
-        let peer_id = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
-
-        let multiaddr = Multiaddr::from_str("/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid multiaddr");
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
         create_user(db.clone(), peer_id.clone(), multiaddr.clone())
             .expect("create_user failed");
 
-        let user = fetch_user_by_peer_id(db, peer_id).expect("fetch_user_by_peer_id failed");
+        let user = fetch_user_by_peer_id(db, peer_id.clone()).expect("fetch_user_by_peer_id failed");
 
         assert_eq!(user.peer_id, peer_id);
         assert_eq!(user.multiaddr, multiaddr);
@@ -922,11 +911,8 @@ pub mod test {
     pub fn test_update_user_correctly_updates_user_data() {
         let db = init_db(":memory:".into()).expect("db init failed");
 
-        let peer_id = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
-
-        let initial_addr = Multiaddr::from_str("/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid multiaddr");
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let initial_addr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
         create_user(db.clone(), peer_id.clone(), initial_addr)
             .expect("create_user failed");
@@ -934,8 +920,7 @@ pub mod test {
         let user = fetch_user_by_peer_id(db.clone(), peer_id.clone())
             .expect("fetch_user_by_peer_id failed");
 
-        let updated_addr = Multiaddr::from_str("/ip4/192.168.1.10/tcp/9000/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid updated multiaddr");
+        let updated_addr = "/ip4/192.168.1.10/tcp/9000/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
         update_user(db.clone(), user.id, updated_addr.clone())
             .expect("update_user failed");
@@ -951,11 +936,9 @@ pub mod test {
     pub fn test_delete_user_correctly_deletes_user_data() {
         let db = init_db(":memory:".into()).expect("db init failed");
 
-        let peer_id = PeerId::from_str("12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid peer id");
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
-        let multiaddr = Multiaddr::from_str("/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK")
-            .expect("invalid multiaddr");
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
         create_user(db.clone(), peer_id.clone(), multiaddr)
             .expect("create_user failed");
@@ -1060,7 +1043,10 @@ pub mod test {
     pub fn test_create_nickname_correctly_inserts_nickname_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap())
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
             .expect("User creation failed");
 
         let user_id: i64 = {
@@ -1092,7 +1078,10 @@ pub mod test {
     pub fn test_update_nickname_correctly_updates_nickname_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap())
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr =  "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
             .unwrap();
 
         let user_id: i64 = {
@@ -1134,7 +1123,10 @@ pub mod test {
     pub fn test_delete_nickname_correctly_deletes_nickname_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap())
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
             .unwrap();
 
         let user_id: i64 = {
@@ -1185,7 +1177,10 @@ pub mod test {
     pub fn test_fetch_friend_by_id_correctly_fetches_friend_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap())
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
             .unwrap();
 
         let user_id: i64 = {
@@ -1227,7 +1222,10 @@ pub mod test {
     pub fn test_fetch_friend_by_user_id_correctly_fetches_friend_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap())
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
             .unwrap();
 
         let user_id: i64 = {
@@ -1259,7 +1257,10 @@ pub mod test {
     pub fn test_create_friend_correctly_inserts_friend_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap())
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
             .expect("User creation failed");
 
         let user_id: i64 = {
@@ -1290,7 +1291,10 @@ pub mod test {
     pub fn test_delete_friend_correctly_deletes_friend_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1340,7 +1344,10 @@ pub mod test {
     pub fn test_fetch_direct_message_by_id_correctly_fetches_direct_message_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1384,7 +1391,10 @@ pub mod test {
     pub fn test_fetch_direct_messages_with_user_correctly_fetches_direct_message_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1418,7 +1428,10 @@ pub mod test {
     pub fn test_create_direct_message_correctly_inserts_direct_message_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1451,7 +1464,10 @@ pub mod test {
     pub fn test_update_direct_message_correctly_updates_direct_message_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1491,7 +1507,10 @@ pub mod test {
     pub fn test_delete_direct_message_correctly_deletes_direct_message_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1541,7 +1560,10 @@ pub mod test {
     pub fn test_fetch_post_by_id_correctly_fetches_post() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1583,7 +1605,10 @@ pub mod test {
     pub fn test_fetch_all_posts_correctly_fetches_all_post_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1627,7 +1652,10 @@ pub mod test {
     pub fn test_fetch_posts_from_user_correctly_fetches_post_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1661,7 +1689,10 @@ pub mod test {
     pub fn test_create_post_correctly_inserts_post_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.to_string(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1693,7 +1724,10 @@ pub mod test {
     pub fn test_update_post_correctly_updates_post_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.to_string(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1726,7 +1760,10 @@ pub mod test {
     pub fn test_delete_post_correctly_deletes_post_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1234/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1768,8 +1805,14 @@ pub mod test {
     pub fn test_fetch_blocked_users_correctly_fetches_all_blocked_user_data() {
         let db = init_db(":memory:".into()).unwrap();
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1000/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+
+        create_user(db.clone(), peer_id_1.clone(), multiaddr_1).unwrap();
+        create_user(db.clone(), peer_id_2.clone(), multiaddr_2).unwrap();
 
         let user_ids: Vec<i64> = {
             let conn = db.lock().unwrap();
@@ -1806,7 +1849,10 @@ pub mod test {
     pub fn test_fetch_blocked_user_by_id_correctly_fetches_blocked_user_data() {
         let db = init_db(":memory:".into()).unwrap();
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1002/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
         let db_guard = db.lock().unwrap();
         let user_id: i64 = db_guard.query_row(
             "SELECT id FROM tbl_users LIMIT 1;", 
@@ -1846,7 +1892,10 @@ pub mod test {
     pub fn test_fetch_blocked_user_by_user_id_correctly_fetches_blocked_user_data() {
         let db = init_db(":memory:".into()).unwrap();
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1003/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string(); 
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();   
+    
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
         
         let db_guard = db.lock().unwrap();
         let user_id: i64 = db_guard.query_row(
@@ -1869,7 +1918,10 @@ pub mod test {
     pub fn test_is_user_blocked_correctly_returns_true() {
         let db = init_db(":memory:".into()).unwrap();
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1004/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
         
         let db_guard = db.lock().unwrap();
 
@@ -1893,7 +1945,10 @@ pub mod test {
     pub fn test_is_user_blocked_correctly_returns_false() {
         let db = init_db(":memory:".into()).unwrap();
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/1005/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
         
         let db_guard = db.lock().unwrap();
 
@@ -1913,7 +1968,10 @@ pub mod test {
     pub fn test_create_blocked_user_correctly_inserts_blocked_user_data() {
         let db = init_db(":memory:".into()).unwrap();
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();
@@ -1944,7 +2002,10 @@ pub mod test {
     pub fn test_delete_blocked_user_correctly_deletes_blocked_user_data() {
         let db = init_db(":memory:".into()).unwrap();
 
-        create_user(db.clone(), PeerId::random(), "/ip4/127.0.0.1/tcp/9001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".parse().unwrap()).unwrap();
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
 
         let user_id: i64 = {
             let conn = db.lock().unwrap();

@@ -1,9 +1,11 @@
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, Transport, dcutr, futures::StreamExt, gossipsub, identity, noise, ping, relay, request_response as reqres, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux
+    Multiaddr, PeerId, StreamProtocol, Transport, dcutr, futures::StreamExt, gossipsub, identity::{self, Keypair}, noise, ping, relay, request_response as reqres, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc, time::Duration, u64};
+use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration, u64};
 use tokio::sync::{Mutex, mpsc};
+
+use crate::db;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectMessage {
@@ -26,8 +28,9 @@ pub struct FriendRequestResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FriendInfo {
+pub struct MyInfo {
     pub peer_id: String,
+    pub keypair: Vec<u8>,
     pub multiaddr: String
 }
 
@@ -69,6 +72,7 @@ enum SwarmCommand {
 
 pub struct P2PNode {
     peer_id: PeerId,
+    keypair: Keypair,
     listen_addresses: Arc<Mutex<Vec<Multiaddr>>>,
     relay_address: Arc<Mutex<Option<Multiaddr>>>,
     swarm_sender: mpsc::UnboundedSender<SwarmCommand>
@@ -76,9 +80,21 @@ pub struct P2PNode {
 
 impl P2PNode {
     pub async fn new(relay_address: Option<String>) -> anyhow::Result<(Self, mpsc::UnboundedReceiver<P2PEvent>)> {
-        let local_key = identity::Keypair::generate_ed25519();
-        let local_peer_id = PeerId::from(local_key.public());
-        log::info!("Local peer id: {local_peer_id}");
+        let (keypair, peer_id) = {
+            if let Ok(identity_data) = db::fetch_identity(db::DATABASE.clone()) {
+                let local_key = Keypair::from_protobuf_encoding(&identity_data.keypair)?;
+                let peer_id = PeerId::from_str(&identity_data.peer_id)?;
+                (local_key, peer_id)
+            }
+            else {
+                let keypair = identity::Keypair::generate_ed25519();
+                let peer_id = PeerId::from(keypair.clone().public());
+
+                (keypair, peer_id)
+            }
+        };
+
+        log::info!("Local peer id: {peer_id}");
 
         let gossipsub_config = gossipsub::ConfigBuilder::default()
             .heartbeat_interval(Duration::from_secs(1))
@@ -87,7 +103,7 @@ impl P2PNode {
             .map_err(|e| anyhow::anyhow!("Gossipsub config error: {e}"))?;
 
         let gossipsub = gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(local_key.clone()),
+            gossipsub::MessageAuthenticity::Signed(keypair.clone()),
             gossipsub_config
         ).map_err(|err| anyhow::anyhow!("Gossipsub behaviour error: {err}"))?;
 
@@ -96,9 +112,9 @@ impl P2PNode {
             reqres::Config::default()
         );
 
-        let (relay_transport, relay_client) = relay::client::new(local_peer_id);
+        let (relay_transport, relay_client) = relay::client::new(peer_id);
 
-        let dcutr = dcutr::Behaviour::new(local_peer_id);
+        let dcutr = dcutr::Behaviour::new(peer_id);
         let ping = ping::Behaviour::new(ping::Config::new());
 
         let behaviour = EnclaveNetworkBehaviour {
@@ -109,7 +125,7 @@ impl P2PNode {
             ping
         };
 
-        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
+        let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keypair.clone())
             .with_tokio()
             .with_tcp(
                 tcp::Config::default(),
@@ -396,9 +412,12 @@ impl P2PNode {
             }
         });
 
+        log::info!("Finished starting P2P node.");
+
         Ok((
             Self {
-                peer_id: local_peer_id,
+                peer_id: peer_id,
+                keypair: keypair,
                 listen_addresses,
                 relay_address: relay_addr,
                 swarm_sender
@@ -409,6 +428,10 @@ impl P2PNode {
 
     pub fn get_peer_id(&self) -> PeerId {
         self.peer_id
+    }
+
+    pub fn get_keypair(&self) -> Keypair {
+        self.keypair.clone()
     }
 
     pub async fn get_listen_addresses(&self) -> Vec<Multiaddr> {
