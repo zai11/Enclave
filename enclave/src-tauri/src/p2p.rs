@@ -1,6 +1,8 @@
 use libp2p::{
     Multiaddr, PeerId, StreamProtocol, Transport, dcutr, futures::StreamExt, gossipsub, identity::{self, Keypair}, noise, ping, relay, request_response as reqres, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux
 };
+use libp2p_core::connection::ConnectedPoint;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr, sync::Arc, time::Duration, u64};
 use tokio::sync::{Mutex, mpsc};
@@ -48,7 +50,8 @@ pub enum P2PEvent {
     PeerDisconnected(PeerId),
     FriendRequestReceived { from: PeerId, request: FriendRequest },
     FriendRequestAccepted { peer: PeerId },
-    FriendRequestDenied { peer: PeerId }
+    FriendRequestDenied { peer: PeerId },
+    Error { context: &'static str, error: String }
 }
 
 #[derive(NetworkBehaviour)]
@@ -67,6 +70,7 @@ enum SwarmCommand {
     AcceptFriendRequest(PeerId),
     DenyFriendRequest(PeerId),
     GetFriendList(tokio::sync::oneshot::Sender<Vec<PeerId>>),
+    GetInboundFriendRequests(tokio::sync::oneshot::Sender<HashMap<PeerId, FriendRequest>>),
     ConnectToRelay(Multiaddr)
 }
 
@@ -80,17 +84,22 @@ pub struct P2PNode {
 
 impl P2PNode {
     pub async fn new(relay_address: Option<String>) -> anyhow::Result<(Self, mpsc::UnboundedReceiver<P2PEvent>)> {
-        let (keypair, peer_id) = {
+        let (keypair, peer_id, port_number) = {
             if let Ok(identity_data) = db::fetch_identity(db::DATABASE.clone()) {
+                log::info!("DEBUG: Called");
                 let local_key = Keypair::from_protobuf_encoding(&identity_data.keypair)?;
                 let peer_id = PeerId::from_str(&identity_data.peer_id)?;
-                (local_key, peer_id)
+                let port_number = identity_data.port_number;
+                (local_key, peer_id, port_number)
             }
             else {
                 let keypair = identity::Keypair::generate_ed25519();
                 let peer_id = PeerId::from(keypair.clone().public());
+                let port_number = rand::rng().random_range(49152..65535);
 
-                (keypair, peer_id)
+                db::create_identity(db::DATABASE.clone(), keypair.to_protobuf_encoding()?, peer_id.to_string(), port_number)?;
+
+                (keypair, peer_id, port_number)
             }
         };
 
@@ -144,7 +153,7 @@ impl P2PNode {
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
             .build();
 
-        swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+        swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{port_number}").parse()?)?;
 
         let topic = gossipsub::IdentTopic::new("enclave-messages");
         swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
@@ -160,7 +169,6 @@ impl P2PNode {
         if let Some(relay_str) = relay_address {
             if let Ok(addr) = relay_str.parse::<Multiaddr>() {
                 log::info!("Connecting to relay: {}", addr);
-                println!("Connecting to relay: {}", addr);
                 swarm.dial(addr.clone())?;
                 *relay_addr_clone.lock().await = Some(addr);
             }
@@ -171,7 +179,6 @@ impl P2PNode {
             match swarm.select_next_some().await {
                 SwarmEvent::NewListenAddr { address, .. } => {
                     log::info!("Listening on {address}");
-                    println!("Listening on {address}");
                     break address;
                 },
                 _ => continue,
@@ -181,8 +188,71 @@ impl P2PNode {
         listen_addresses_clone.lock().await.push(first_address);
 
         tokio::spawn(async move {
-            let mut friend_list: Vec<PeerId> = Vec::new();
-            let mut pending_friend_requests: HashMap<PeerId, FriendRequest> = HashMap::new();
+            let mut friend_list: Vec<PeerId> = db::fetch_all_friends(db::DATABASE.clone())
+                .unwrap_or_else(|err| {
+                    let _ = event_sender.send(P2PEvent::Error {
+                        context: "fetch_all_friends",
+                        error: err.to_string(),
+                    });
+                    Vec::new()
+                })
+                .into_iter()
+                .filter_map(|friend| {
+                    match db::fetch_user_by_id(db::DATABASE.clone(), friend.user_id) {
+                        Ok(user) => match PeerId::from_str(&user.peer_id) {
+                            Ok(peer_id) => Some(peer_id),
+                            Err(err) => {
+                                let _ = event_sender.send(P2PEvent::Error {
+                                    context: "parse_peer_id",
+                                    error: err.to_string(),
+                                });
+                                None
+                            }
+                        },
+                        Err(err) => {
+                            let _ = event_sender.send(P2PEvent::Error {
+                                context: "fetch_user_by_id",
+                                error: err.to_string(),
+                            });
+                            None
+                        }
+                    }
+                })
+                .collect();
+
+            let inbound_friend_requests: HashMap<PeerId, FriendRequest> = db::fetch_all_friend_requests(db::DATABASE.clone())
+                .unwrap_or_else(|err| {
+                    let _ = event_sender.send(P2PEvent::Error {
+                        context: "fetch_all_friend_requests",
+                        error: err.to_string(),
+                    });
+                    Vec::new()
+                })
+                .into_iter()
+                .filter_map(|req| {
+                    match db::fetch_user_by_id(db::DATABASE.clone(), req.user_id) {
+                        Ok(user) => {
+                            let peer_id = PeerId::from_str(user.peer_id.as_str()).unwrap();
+                            let req = FriendRequest {
+                                from_peer_id: user.peer_id,
+                                from_multiaddr: user.multiaddr,
+                                message: req.message
+                            };
+                            Some((peer_id, req))
+                        },
+                        Err(err) => {
+                            let _ = event_sender.send(P2PEvent::Error {
+                                context: "fetch_user_by_id",
+                                error: err.to_string(),
+                            });
+                            None
+                        }
+                    }
+                })
+                .collect();
+
+            let mut outbound_friend_requests = HashMap::new();
+            let mut pending_friend_request_responses = HashMap::new();
 
             loop {
                 tokio::select! {
@@ -207,11 +277,29 @@ impl P2PNode {
                                                 match request {
                                                     P2PMessage::FriendRequest(req) => {
                                                         log::info!("Received friend request from {}: {}", peer, req.message);
-                                                        println!("Received friend request from {}: {}", peer, req.message);
                                                         let _ = event_sender.send(P2PEvent::FriendRequestReceived {
                                                             from: peer,
                                                             request: req.clone()
                                                         });
+
+                                                        let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
+                                                            Ok(u) => u,
+                                                            Err(err) => {
+                                                                let _ = event_sender.send(P2PEvent::Error { 
+                                                                    context: "fetch_user_by_peer_id", 
+                                                                    error: err.to_string() 
+                                                                });
+                                                                continue;
+                                                            }
+                                                        };
+
+                                                        if let Err(err) = db::create_friend_request(db::DATABASE.clone(), user.id, req.message) {
+                                                            let _ = event_sender.send(P2PEvent::Error {
+                                                                context: "create_friend_request",
+                                                                error: err.to_string()
+                                                            });
+                                                            continue;
+                                                        }
 
                                                         // Send back an empty acknowledgement so the request doesn't hang
                                                         // But don't auto-accept - wait for user action
@@ -225,12 +313,43 @@ impl P2PNode {
                                                     },
                                                     P2PMessage::FriendRequestResponse(response) => {
                                                         log::info!("Received friend request response from {}: accepted={}", peer, response.accepted);
-                                                        println!("Received friend request response from {}: accepted={}", peer, response.accepted);
                                                         if response.accepted {
                                                             if !friend_list.contains(&peer) {
+                                                                let friend_count = match db::fetch_all_friends(db::DATABASE.clone()) {
+                                                                    Ok(f) => f.len(),
+                                                                    Err(_) => 0
+                                                                };
+                                                                log::info!("Before friend count: {friend_count}");
+                                                                
+                                                                let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
+                                                                    Ok(u) => u,
+                                                                    Err(err) => {
+                                                                        let _ = event_sender.send(P2PEvent::Error { 
+                                                                            context: "fetch_user_by_peer_id", 
+                                                                            error: err.to_string() 
+                                                                        });
+                                                                        continue;
+                                                                    }
+                                                                };
+
+                                                                if let Err(err) = db::create_friend(db::DATABASE.clone(), user.id) {
+                                                                    let _ = event_sender.send(P2PEvent::Error {
+                                                                        context: "create_friend",
+                                                                        error: err.to_string()
+                                                                    });
+                                                                    continue;
+                                                                }
+
+                                                                let friend_count = match db::fetch_all_friends(db::DATABASE.clone()) {
+                                                                    Ok(f) => f.len(),
+                                                                    Err(_) => 0
+                                                                };
+                                                                log::info!("After friend count: {friend_count}");
+
                                                                 friend_list.push(peer);
                                                                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
                                                             }
+                                                            
                                                             let _ = event_sender.send(P2PEvent::FriendRequestAccepted { peer });
                                                         }
                                                         else {
@@ -244,7 +363,6 @@ impl P2PNode {
 
                                                         if !friend_list.contains(&peer) {
                                                             log::info!("Ignoring DM from non-friend: {}", peer);
-                                                            println!("Ignoring DM from non-friend: {}", peer);
                                                             return;
                                                         }
 
@@ -254,24 +372,20 @@ impl P2PNode {
                                             },
                                             reqres::Message::Response { request_id, response } => {
                                                 log::info!("Received response for request {:?}: {:?}", request_id, response);
-                                                println!("Received response for request {:?}: {:?}", request_id, response);
                                             }
                                         }
                                     },
                                     reqres::Event::OutboundFailure { peer, request_id, error, .. } => {
                                         log::info!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
-                                        println!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
                                     },
                                     reqres::Event::InboundFailure { peer, request_id, error, .. } => {
                                         log::info!("Inbound request {:?} to {} failed {:?}", request_id, peer, error);
-                                        println!("Inbound request {:?} to {} failed {:?}", request_id, peer, error);
                                     },
                                     _ => {}
                                 }
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::RelayClient(event)) => {
                                 log::info!("Relay client event: {:?}", event);
-                                println!("Relay client event: {:?}", event);
                             },
                             SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::Dcutr(event)) => {
                                 log::info!("DCUTR event {:?}", event);
@@ -283,19 +397,35 @@ impl P2PNode {
                                 log::info!("Listening on {address}");
                                 listen_addresses_clone.lock().await.push(address);
                             },
-                            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                                 log::info!("Connected to peer: {peer_id}");
                                 let _ = event_sender.send(P2PEvent::PeerConnected(peer_id));
 
-                                if let Some(pending_request) = pending_friend_requests.remove(&peer_id) {
+                                let multiaddr = match &endpoint {
+                                    ConnectedPoint::Dialer { address, .. } => address.clone(),
+                                    ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr.clone()
+                                };
+
+                                if let Err(err) = db::create_user(db::DATABASE.clone(), peer_id.to_string(), multiaddr.to_string()) {
+                                    let _ = event_sender.send(P2PEvent::Error {
+                                        context: "create_user",
+                                        error: err.to_string()
+                                    });
+                                }
+
+                                if let Some(pending_request) = outbound_friend_requests.remove(&peer_id) {
                                     log::info!("Sending buffered friend request to {}", peer_id);
                                     let request = P2PMessage::FriendRequest(pending_request);
                                     swarm.behaviour_mut().request_response.send_request(&peer_id, request);
                                 }
+
+                                if let Some(pending_response) = pending_friend_request_responses.remove(&peer_id) {
+                                    log::info!("Sending buffered friend request response to {}", peer_id);
+                                    swarm.behaviour_mut().request_response.send_request(&peer_id, pending_response);
+                                }
                             },
                             SwarmEvent::ConnectionClosed { peer_id, .. } => {
                                 log::info!("Disconnected from peer: {peer_id}");
-                                println!("Disconnected from peer: {peer_id}");
                                 let _ = event_sender.send(P2PEvent::PeerDisconnected(peer_id));
                             },
                             _ => {}
@@ -357,17 +487,56 @@ impl P2PNode {
                                     message
                                 };
 
-                                pending_friend_requests.insert(peer, request);
+                                outbound_friend_requests.insert(peer, request);
 
                                 if let Err(err) = swarm.dial(address) {
                                     log::error!("Failed to dial peer {}: {}", peer, err);
-                                    pending_friend_requests.remove(&peer);
+                                    outbound_friend_requests.remove(&peer);
                                 }
                             },
                             SwarmCommand::AcceptFriendRequest(peer) => {
                                 log::info!("Accepting friend request from: {}", peer);
-                                println!("Accepting friend request from: {}", peer);
                                 if !friend_list.contains(&peer) {
+                                    let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
+                                        Ok(u) => u,
+                                        Err(err) => {
+                                            let _ = event_sender.send(P2PEvent::Error { 
+                                                context: "fetch_user_by_peer_id", 
+                                                error: err.to_string() 
+                                            });
+                                            continue;
+                                        }
+                                    };
+
+                                    log::info!("{}, {}", peer.to_string(), user.peer_id);
+
+                                    if let Err(err) = db::create_friend(db::DATABASE.clone(), user.id) {
+                                        let _ = event_sender.send(P2PEvent::Error {
+                                            context: "create_friend",
+                                            error: err.to_string()
+                                        });
+                                        continue;
+                                    }
+
+                                    let friend_request = match db::fetch_friend_request_by_user_id(db::DATABASE.clone(), user.id) {
+                                        Ok(fr) => fr,
+                                        Err(err) => {
+                                            let _ = event_sender.send(P2PEvent::Error {
+                                                context: "fetch_friend_request_by_user_id",
+                                                error: err.to_string()
+                                            });
+                                            continue;
+                                        }
+                                    };
+
+                                    if let Err(err) = db::delete_friend_request(db::DATABASE.clone(), friend_request.id) {
+                                        let _ = event_sender.send(P2PEvent::Error {
+                                            context: "delete_friend_request",
+                                            error: err.to_string()
+                                        });
+                                        continue;
+                                    }
+
                                     friend_list.push(peer);
                                     swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer);
                                 }
@@ -386,9 +555,77 @@ impl P2PNode {
                                         multiaddr: address_to_send
                                     }
                                 );
-                                swarm.behaviour_mut().request_response.send_request(&peer, response);
+
+                                if swarm.is_connected(&peer) {
+                                    log::info!("Already connected to {}, sending acceptance immediately", peer);
+                                    swarm.behaviour_mut().request_response.send_request(&peer, response);
+                                } else {
+                                    log::info!("Not connected to {}, dialing before sending acceptance", peer);
+
+                                    let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
+                                        Ok(u) => u,
+                                        Err(err) => {
+                                            let _ = event_sender.send(P2PEvent::Error { 
+                                                context: "fetch_user_by_peer_id", 
+                                                error: err.to_string() 
+                                            });
+                                            continue;
+                                        }
+                                    };
+
+                                    let peer_addr = match user.multiaddr.parse::<Multiaddr>() {
+                                        Ok(addr) => addr,
+                                        Err(err) => {
+                                            let _ = event_sender.send(P2PEvent::Error {
+                                                context: "parse::<Multiaddress>",
+                                                error: err.to_string()
+                                            });
+                                            continue;
+                                        }
+                                    };
+
+                                    pending_friend_request_responses.insert(peer, response);
+
+                                    if let Err(err) = swarm.dial(peer_addr) {
+                                        let _ = event_sender.send(P2PEvent::Error {
+                                            context: "swarm.dial",
+                                            error: err.to_string()
+                                        });
+                                        pending_friend_request_responses.remove(&peer);
+                                    }
+                                }
                             },
                             SwarmCommand::DenyFriendRequest(peer) => {
+                                let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
+                                    Ok(u) => u,
+                                    Err(err) => {
+                                        let _ = event_sender.send(P2PEvent::Error { 
+                                            context: "fetch_user_by_peer_id", 
+                                            error: err.to_string() 
+                                        });
+                                        continue;
+                                    }
+                                };
+
+                                let friend_request = match db::fetch_friend_request_by_user_id(db::DATABASE.clone(), user.id) {
+                                    Ok(fr) => fr,
+                                    Err(err) => {
+                                        let _ = event_sender.send(P2PEvent::Error {
+                                            context: "fetch_friend_request_by_user_id",
+                                            error: err.to_string()
+                                        });
+                                        continue;
+                                    }
+                                };
+
+                                if let Err(err) = db::delete_friend_request(db::DATABASE.clone(), friend_request.id) {
+                                    let _ = event_sender.send(P2PEvent::Error {
+                                        context: "delete_friend_request",
+                                        error: err.to_string()
+                                    });
+                                    continue;
+                                }
+
                                 let response = P2PMessage::FriendRequestResponse(
                                     FriendRequestResponse {
                                         accepted: false,
@@ -400,9 +637,11 @@ impl P2PNode {
                             SwarmCommand::GetFriendList(sender) => {
                                 let _ = sender.send(friend_list.clone());
                             },
+                            SwarmCommand::GetInboundFriendRequests(sender) => {
+                                let _ = sender.send(inbound_friend_requests.clone());
+                            }
                             SwarmCommand::ConnectToRelay(address) => {
                                 log::info!("Connecting to relay: {}", address);
-                                println!("Connecting to relay: {}", address);
                                 let _ = swarm.dial(address.clone());
                                 *relay_addr_clone.lock().await = Some(address);
                             }
@@ -477,6 +716,12 @@ impl P2PNode {
     pub async fn get_friend_list(&self) -> anyhow::Result<Vec<PeerId>> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.swarm_sender.send(SwarmCommand::GetFriendList(sender))?;
+        Ok(receiver.await?)
+    }
+
+    pub async fn get_inbound_friend_requests(&self) -> anyhow::Result<HashMap<PeerId, FriendRequest>> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.swarm_sender.send(SwarmCommand::GetInboundFriendRequests(sender))?;
         Ok(receiver.await?)
     }
 

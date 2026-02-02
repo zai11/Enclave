@@ -25,7 +25,7 @@
   let messages: Message[] = [];
   let connectedPeers: string[] = [];
   let friendList: string[] = [];
-  let pendingRequests: Array<{peerId: string, request: FriendRequest}> = [];
+  let pendingRequests: Array<[string, FriendRequest]> = [];
   let messageInput = '';
   let addFriendAddress = '';
   let addFriendMessage = '';
@@ -71,8 +71,8 @@
       console.log('Friend request received event:', event.payload);
       const [ peerId, request ] = event.payload;
       console.log('Parsed - peerId:', peerId, 'request:', request);
-      if (!pendingRequests.some(r => r.peerId === peerId)) {
-        pendingRequests = [...pendingRequests, {peerId, request}];
+      if (!pendingRequests.some(r => r[0] === peerId)) {
+        pendingRequests = [...pendingRequests, [peerId, request]];
         showFriendRequests = true;
         console.log('Added to pending requests. Total:', pendingRequests.length);
       } else {
@@ -88,6 +88,14 @@
 
     await listen('friend-request-denied', (event: any) => {
       alert('Friend request was denied');
+    });
+
+    await listen('refresh-inbound-friend-requests', (event: any) => {
+      refreshInboundFriendRequests();
+    });
+
+    await listen('refresh-friend-list', (event: any) => {
+      refreshFriendList();
     });
   });
 
@@ -165,7 +173,7 @@
   async function acceptFriendRequest(peerId: string) {
     try {
       await invoke('accept_friend_request', { peerId });
-      pendingRequests = pendingRequests.filter(r => r.peerId !== peerId);
+      pendingRequests = pendingRequests.filter(r => r[0] !== peerId);
       if (pendingRequests.length === 0) {
         showFriendRequests = false;
       }
@@ -179,7 +187,7 @@
   async function denyFriendRequest(peerId: string) {
     try {
       await invoke('deny_friend_request', { peerId });
-      pendingRequests = pendingRequests.filter(r => r.peerId !== peerId);
+      pendingRequests = pendingRequests.filter(r => r[0] !== peerId);
       if (pendingRequests.length === 0) {
         showFriendRequests = false;
       }
@@ -194,6 +202,14 @@
       friendList = await invoke<string[]>('get_friend_list');
     } catch (error) {
       console.error('Failed to get friend list:', error);
+    }
+  }
+
+  async function refreshInboundFriendRequests() {
+    try {
+      pendingRequests = await invoke('get_inbound_friend_requests');
+    } catch (error) {
+      console.error('Failed to get inbound friend requests: ', error);
     }
   }
   
@@ -458,13 +474,13 @@
           <!-- svelte-ignore a11y_click_events_have_key_events -->
           <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="friend-requests-modal-title" aria-modal="true" tabindex=0>
             <h2 id="friend-requests-modal-title">Friend Requests</h2>
-            {#each pendingRequests as { peerId, request }}
+            {#each pendingRequests as peerIdRequestPair}
               <div class="friend-request">
-                <p class="request-peer">{peerId.slice(0, 24)}...</p>
-                <p class="request-message">"{request.message}"</p>
+                <p class="request-peer">{peerIdRequestPair[0].slice(0, 24)}...</p>
+                <p class="request-message">"{peerIdRequestPair[1].message}"</p>
                 <div class="request-actions">
-                  <button on:click={() => acceptFriendRequest(peerId)} class="btn-primary">Accept</button>
-                  <button on:click={() => denyFriendRequest(peerId)} class="btn-secondary">Deny</button>
+                  <button on:click={() => acceptFriendRequest(peerIdRequestPair[0])} class="btn-primary">Accept</button>
+                  <button on:click={() => denyFriendRequest(peerIdRequestPair[0])} class="btn-secondary">Deny</button>
                 </div>
               </div>
             {/each}
