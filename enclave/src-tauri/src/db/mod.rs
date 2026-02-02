@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 
-use crate::db::models::{blocked_user::BlockedUser, direct_message::DirectMessage, friend::Friend, identity::Identity, nickname::Nickname, post::Post, user::User};
+use crate::db::models::{blocked_user::BlockedUser, direct_message::DirectMessage, friend::Friend, friend_request::FriendRequest, identity::Identity, nickname::Nickname, post::Post, user::User};
 
 pub mod models;
 
@@ -25,6 +25,7 @@ pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
                             id INTEGER PRIMARY KEY CHECK (id=1),
                             keypair BLOB NOT NULL,
                             peer_id TEXT NOT NULL,
+                            port_number INTEGER NOT NULL,
                             created_at TEXT NOT NULL
                         );", ())?;
         log::info!("Created identity table.");
@@ -47,6 +48,16 @@ pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
                             FOREIGN KEY (user_id) REFERENCES tbl_users(id)
                         );", ())?;
         log::info!("Created nicknames table.");
+    }
+
+    if !db.table_exists(None, "tbl_friend_requests")? {
+        db.execute("CREATE TABLE tbl_friend_requests (
+                            id INTEGER PRIMARY KEY,
+                            user_id INTEGER NOT NULL,
+                            message TEXT,
+                            FOREIGN KEY (user_id) REFERENCES tbl_users(id)
+                        );", ())?;
+        log::info!("Created friend requests table.");
     }
 
     if !db.table_exists(None, "tbl_friends")? {
@@ -100,14 +111,14 @@ pub fn fetch_identity(db: Arc<Mutex<Connection>>) -> anyhow::Result<Identity> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, keypair, peer_id, created_at FROM tbl_identity")?;
+    let mut query = db_guard.prepare("SELECT id, keypair, peer_id, port_number, created_at FROM tbl_identity")?;
 
     if !query.exists(())? {
         return Err(anyhow::anyhow!("No identity data was found."));
     }
 
-    let (id, keypair, peer_id, created_at): (i64, Vec<u8>, String, String) = query.query_row((), |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    let (id, keypair, peer_id, port_number, created_at): (i64, Vec<u8>, String, i64, String) = query.query_row((), |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
     })?;
 
     Ok(
@@ -115,22 +126,24 @@ pub fn fetch_identity(db: Arc<Mutex<Connection>>) -> anyhow::Result<Identity> {
             id, 
             keypair, 
             peer_id, 
+            port_number,
             DateTime::parse_from_rfc3339(&created_at)?.to_utc()
         )
     )
 }
 
-pub fn create_identity(db: Arc<Mutex<Connection>>, keypair: Vec<u8>, peer_id: String) -> anyhow::Result<()> {
+pub fn create_identity(db: Arc<Mutex<Connection>>, keypair: Vec<u8>, peer_id: String, port_number: i64) -> anyhow::Result<()> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
     let created_at = Utc::now();
 
     db_guard.execute(
-        "INSERT INTO tbl_identity (keypair, peer_id, created_at) VALUES (?1, ?2, ?3)", 
+        "INSERT INTO tbl_identity (keypair, peer_id, port_number, created_at) VALUES (?1, ?2, ?3, ?4)", 
         rusqlite::params![
             keypair,
             peer_id,
+            port_number,
             created_at.to_rfc3339()
         ]
     )?;
@@ -302,6 +315,107 @@ pub fn delete_nickname(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Result<()
     Ok(())
 }
 
+pub fn fetch_friend_request_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Result<FriendRequest> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    let mut query = db_guard.prepare("SELECT id, user_id, message FROM tbl_friend_requests WHERE id=?1;")?;
+
+    if !query.exists(rusqlite::params![id])? {
+        return Err(anyhow::anyhow!("A friend request with id {id} was not found."));
+    }
+
+    let (id, user_id, message): (i64, i64, String) = query.query_row(rusqlite::params![id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+
+    Ok(
+        FriendRequest::new(
+            id,
+            user_id,
+            message
+        )
+    )
+}
+
+pub fn fetch_friend_request_by_user_id(db: Arc<Mutex<Connection>>, user_id: i64) -> anyhow::Result<FriendRequest> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    let mut query = db_guard.prepare("SELECT id, user_id, message FROM tbl_friend_requests WHERE user_id=?1;")?;
+
+    if !query.exists(rusqlite::params![user_id])? {
+        return Err(anyhow::anyhow!("A friend request with user_id {user_id} was not found."));
+    }
+
+    let (id, user_id, message): (i64, i64, String) = query.query_row(rusqlite::params![user_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+
+    Ok(
+        FriendRequest::new(
+            id,
+            user_id,
+            message
+        )
+    )
+}
+
+pub fn fetch_all_friend_requests(db: Arc<Mutex<Connection>>) -> anyhow::Result<Vec<FriendRequest>> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    let mut query = db_guard.prepare("SELECT id, user_id, message FROM tbl_friend_requests;")?;
+
+    if !query.exists(())? {
+        return Err(anyhow::anyhow!("No friend request data was found."));
+    }
+
+    let rows = query.query_map((), |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?
+        ))
+    })?;
+
+    rows.map(|row_result| {
+        let row = row_result?;
+
+        Ok(
+            FriendRequest::new(
+                row.0,
+                row.1,
+                row.2
+            )
+        )
+    }).collect::<anyhow::Result<Vec<FriendRequest>>>()
+}
+
+pub fn create_friend_request(db: Arc<Mutex<Connection>>, user_id: i64, message: String) -> anyhow::Result<()> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    db_guard.execute(
+        "INSERT INTO tbl_friend_requests (user_id, message) VALUES (?1, ?2);",
+        rusqlite::params![user_id, message]
+    )?;
+
+    Ok(())
+}
+
+pub fn delete_friend_request(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Result<()> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    db_guard.execute(
+        "DELETE FROM tbl_friend_requests WHERE id=?1;", 
+        rusqlite::params![id]
+    )?;
+
+    Ok(())
+}
+
 pub fn fetch_friend_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Result<Friend> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
@@ -344,6 +458,35 @@ pub fn fetch_friend_by_user_id(db: Arc<Mutex<Connection>>, user_id: i64) -> anyh
             user_id
         )
     )
+}
+
+pub fn fetch_all_friends(db: Arc<Mutex<Connection>>) -> anyhow::Result<Vec<Friend>> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    let mut query = db_guard.prepare("SELECT id, user_id FROM tbl_friends;")?;
+
+    if !query.exists(())? {
+        return Err(anyhow::anyhow!("No friend data was found."));
+    }
+
+    let rows = query.query_map((), |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?
+        ))
+    })?;
+
+    rows.map(|row_result| {
+        let row = row_result?;
+
+        Ok(
+            Friend::new(
+                row.0,
+                row.1
+            )
+        )
+    }).collect::<anyhow::Result<Vec<Friend>>>()
 }
 
 pub fn create_friend(db: Arc<Mutex<Connection>>, user_id: i64) -> anyhow::Result<()> {
@@ -755,6 +898,8 @@ pub fn delete_blocked_user(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Resul
 #[cfg(test)]
 pub mod test {
 
+    use rusqlite::params;
+
     use super::*;
 
     #[test]
@@ -774,8 +919,8 @@ pub mod test {
             let db_guard = db.lock().unwrap();
 
             db_guard.execute(
-                "INSERT INTO tbl_identity (id, keypair, peer_id, created_at) VALUES (?1, ?2, ?3, ?4);",
-                rusqlite::params![1i64, vec![1u8, 2, 3, 4], "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK", "2024-01-01T00:00:00Z"]
+                "INSERT INTO tbl_identity (id, keypair, peer_id, port_number, created_at) VALUES (?1, ?2, ?3, ?4, ?5);",
+                rusqlite::params![1i64, vec![1u8, 2, 3, 4], "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK", 5555, "2024-01-01T00:00:00Z"]
             ).expect("insert identity failed");
         }
 
@@ -784,6 +929,7 @@ pub mod test {
         assert_eq!(identity.id, 1);
         assert_eq!(identity.keypair, vec![1u8, 2, 3, 4]);
         assert_eq!(identity.peer_id.to_string(), "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK");
+        assert_eq!(identity.port_number, 5555);
         assert_eq!(identity.created_at.to_rfc3339(), "2024-01-01T00:00:00+00:00");
     }
 
@@ -793,12 +939,12 @@ pub mod test {
 
         let keypair1 = vec![1u8, 2, 3];
 
-        create_identity(db.clone(), keypair1, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into())
+        create_identity(db.clone(), keypair1, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into(), 5555)
             .expect("first create_identity failed");
 
         let keypair2 = vec![9u8, 8, 7];
 
-        let second_result = create_identity(db.clone(), keypair2, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into());
+        let second_result = create_identity(db.clone(), keypair2, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into(), 5555);
 
         assert!(second_result.is_err(), "expected create_identity to fail on second insert");
     }
@@ -809,7 +955,7 @@ pub mod test {
 
         let keypair = vec![10u8, 20, 30, 40];
 
-        let result = create_identity(db.clone(), keypair.clone(), "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into());
+        let result = create_identity(db.clone(), keypair.clone(), "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".into(), 5555);
 
         assert!(result.is_ok(), "create_identity failed");
 
@@ -818,6 +964,7 @@ pub mod test {
         assert_eq!(identity.id, 1);
         assert_eq!(identity.keypair, keypair);
         assert_eq!(identity.peer_id, "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string());
+        assert_eq!(identity.port_number, 5555);
     }
 
     #[test]
@@ -1164,6 +1311,220 @@ pub mod test {
     }
 
     #[test]
+    pub fn test_fetch_friend_request_by_id_errors_invalid_id() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let result = fetch_friend_request_by_id(db.clone(), 999);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("was not found"), "Unexpected error message");
+    }
+
+    #[test]
+    pub fn test_fetch_friend_request_by_id_correctly_fetches_friend_request_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
+            .unwrap();
+
+        let user_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM tbl_users LIMIT 1;",
+                [],
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        let friend_request_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO tbl_friend_requests (user_id, from_me) VALUES (?1, ?2);",
+                params![user_id, false]
+            ).unwrap();
+            conn.last_insert_rowid()
+        };
+
+        let friend_request = fetch_friend_request_by_id(db.clone(), friend_request_id)
+            .expect("Friend request fetch failed");
+
+        assert_eq!(friend_request.id, friend_request_id);
+        assert_eq!(friend_request.user_id, user_id);
+    }
+
+    #[test]
+    pub fn test_fetch_friend_request_by_user_id_errors_invalid_user_id() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let result = fetch_friend_request_by_user_id(db.clone(), 999);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("was not found"), "Unexpected error message");
+    }
+
+    #[test]
+    pub fn test_fetch_friend_request_by_user_id_correctly_fetches_friend_request_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
+            .unwrap();
+
+        let user_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM tbl_users LIMIT 1;",
+                [],
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        let friend_request_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO tbl_friend_requests (user_id, from_me) VALUES (?1, ?2);",
+                params![user_id, false]
+            ).unwrap();
+            conn.last_insert_rowid()
+        };
+
+        let friend_request = fetch_friend_request_by_user_id(db.clone(), user_id)
+            .expect("Friend fetch failed");
+
+        assert_eq!(friend_request.id, friend_request_id);
+        assert_eq!(friend_request.user_id, user_id);
+    }
+
+    #[test]
+    pub fn test_fetch_all_friend_requests_errors_no_friend_request_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let result = fetch_all_friend_requests(db.clone());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No friend request data was found"));
+    }
+    
+    #[test]
+    pub fn test_fetch_all_friend_requests_correctly_fetches_all_driend_request_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
+
+        let user_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM tbl_users LIMIT 1;", 
+                [], 
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tbl_friend_requests (user_id, message) VALUES (?1, ?2);",
+            rusqlite::params![user_id, "Message 1".to_string()]
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tbl_friend_requests (user_id, message) VALUES (?1, ?2);",
+            rusqlite::params![user_id, "Message 2".to_string()]
+        ).unwrap();
+        drop(conn);
+
+        let friend_requests = fetch_all_friend_requests(db.clone()).expect("fetch_all_friend_requests failed");
+
+        assert_eq!(friend_requests.len(), 2);
+        assert!(friend_requests.iter().any(|fr| fr.message == "Message 1".to_string()));
+        assert!(friend_requests.iter().any(|fr| fr.message == "Message 2".to_string()));
+    }
+
+    #[test]
+    pub fn test_create_friend_request_correctly_inserts_friend_request_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone())
+            .expect("User creation failed");
+
+        let user_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM tbl_users LIMIT 1;",
+                [],
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        create_friend_request(db.clone(), user_id, "Message".to_string()).expect("create_friend_request failed");
+
+        let (stored_id, stored_user_id, stored_message): (i64, i64, String) = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id, user_id, message FROM tbl_friend_requests LIMIT 1;",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            ).unwrap()
+        };
+
+        assert_eq!(stored_user_id, user_id);
+        assert_eq!(stored_message, "Message".to_string());
+        assert!(stored_id > 0, "Friend request id should be greater than 0");
+    }
+
+    #[test]
+    pub fn test_delete_friend_request_correctly_deletes_friend_request_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+
+        create_user(db.clone(), peer_id.clone(), multiaddr.clone()).unwrap();
+
+        let user_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM tbl_users LIMIT 1;",
+                [], 
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        create_friend_request(db.clone(), user_id, "Message".to_string()).unwrap();
+
+        let friend_request_id: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT id FROM tbl_friend_requests LIMIT 1;",
+                [],
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        delete_friend_request(db.clone(), friend_request_id).expect("delete_friend_request failed");
+
+        let remaining_count: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM tbl_friend_requests;",
+                [],
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        assert_eq!(remaining_count, 0, "Friend request table should be empty after deletion");
+    }
+
+    #[test]
     pub fn test_fetch_friend_by_id_errors_invalid_id() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
@@ -1251,6 +1612,46 @@ pub mod test {
 
         assert_eq!(friend.id, friend_id);
         assert_eq!(friend.user_id, user_id);
+    }
+
+    #[test]
+    pub fn test_fetch_all_friends_errors_no_friend_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let result = fetch_all_friends(db.clone());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No friend data was found"));
+    }
+    
+    #[test]
+    pub fn test_fetch_all_friends_correctly_fetches_all_friend_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+
+        create_user(db.clone(), peer_id_1.clone(), multiaddr_1.clone()).unwrap();
+        create_user(db.clone(), peer_id_2.clone(), multiaddr_2.clone()).unwrap();
+
+        let conn = db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tbl_friends (user_id) VALUES (1);",
+            ()
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tbl_friends (user_id) VALUES (2);",
+            ()
+        ).unwrap();
+        drop(conn);
+
+        let friends = fetch_all_friends(db.clone()).expect("fetch_all_friends failed");
+
+        assert_eq!(friends.len(), 2);
+        assert_eq!(friends[0].user_id, 1);
+        assert_eq!(friends[1].user_id, 2);
     }
 
     #[test]

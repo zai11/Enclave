@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use libp2p::{PeerId, Multiaddr};
 
-use crate::{logger::Logger, p2p::MyInfo};
+use crate::{logger::Logger, p2p::{FriendRequest, MyInfo}};
 
 static LOGGER: once_cell::sync::Lazy<Logger> =
     once_cell::sync::Lazy::new(|| {
@@ -41,13 +41,16 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
 
     *state.p2p_node.lock().await = Some(node);
 
-    let MyInfo{peer_id, keypair, ..} = match get_my_info(state.clone()).await {
+    let MyInfo{peer_id, ..} = match get_my_info(state.clone()).await {
         Ok(info) => info,
         Err(err) => {
             log::error!("start_p2p: {err}");
             return Err(err);
         }
     };
+
+    app.emit("refresh-inbound-friend-requests", ()).ok();
+    app.emit("refresh-friend-list", ()).ok();
 
     tokio::spawn(async move {
         while let Some(event) = event_receiver.recv().await {
@@ -69,6 +72,9 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
                 },
                 P2PEvent::FriendRequestDenied { peer } => {
                     app.emit("friend-request-denied", peer.to_string()).ok();
+                },
+                P2PEvent::Error { context, error } => {
+                    log::error!("{context}: {error}");
                 }
             }
         }
@@ -296,6 +302,35 @@ async fn get_friend_list(state: tauri::State<'_, AppState>) -> Result<Vec<String
 }
 
 #[tauri::command]
+async fn get_inbound_friend_requests(state: tauri::State<'_, AppState>) -> Result<Vec<(String, FriendRequest)>, String> {
+    let node_guard = state.p2p_node.lock().await;
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("get_inbound_friend_requests called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let friend_requests = match node.get_inbound_friend_requests().await {
+        Ok(friend_requests) => friend_requests,
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    }
+        .iter()
+        .map(|(peer_id, friend_request)| (peer_id.to_string(), friend_request.clone()))
+        .collect::<Vec<(String, FriendRequest)>>();
+
+    friend_requests.iter().for_each(|fr| log::info!("key peer id: {}", fr.0));
+    friend_requests.iter().for_each(|fr| log::info!("friend request peer id: {}", fr.1.from_peer_id));
+
+    Ok(friend_requests)
+}
+
+#[tauri::command]
 async fn connect_to_relay(state: tauri::State<'_, AppState>, relay_address: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
 
@@ -347,6 +382,7 @@ fn main() {
             send_message,
             send_direct_message,
             get_friend_list,
+            get_inbound_friend_requests,
             connect_to_relay
         ])
         .run(tauri::generate_context!()) {
