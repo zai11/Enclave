@@ -1,0 +1,13 @@
+[INFO] Application Started
+[INFO] Initilising database...
+[INFO] Created enclave database.
+[INFO] Created identity table.
+[INFO] Created connections table.
+[INFO] Created nicknames table.
+[INFO] Created friend requests table.
+[INFO] Created friends table.
+[INFO] Created direct messages table.
+[INFO] Created posts table.
+[INFO] Created blocked users table.
+[INFO] Creating new identity
+[INFO] Local peer id: 12D3KooWGDV1574UNrXc3zUB8y9zCxBMfoPfezkJEmNiKP4W1Bmp

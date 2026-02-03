@@ -21,8 +21,6 @@ static LOGGER: once_cell::sync::Lazy<Logger> =
         Logger::new(format!("./logs/{date_string}.log").as_str(), LevelFilter::Info).expect("failed to create logger")
     });
 
-
-
 struct AppState {
     p2p_node: Arc<Mutex<Option<P2PNode>>>,
 }

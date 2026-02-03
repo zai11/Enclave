@@ -1,0 +1,15 @@
+[INFO] Application Started
+[INFO] Application Started
+[INFO] Application Started
+[INFO] Application Started
+[INFO] Initilising database...
+[INFO] Created enclave database.
+[INFO] Loading existing identity
+[INFO] Local peer id: 12D3KooWGDV1574UNrXc3zUB8y9zCxBMfoPfezkJEmNiKP4W1Bmp
+[INFO] Listening on /ip4/192.168.56.1/tcp/64847
+[INFO] Finished starting P2P node.
+[INFO] Listening on /ip4/192.168.1.12/tcp/64847
+[INFO] Listening on /ip4/127.0.0.1/tcp/64847
+[ERROR] fetch_all_friends: No friend data was found.
+[ERROR] fetch_all_friend_requests: No friend request data was found.
+[INFO] Application Started
