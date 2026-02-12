@@ -9,14 +9,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::str::FromStr;
 use tokio::sync::{mpsc, Mutex};
-use crate::db;
+use crate::db::{self, models::{direct_message::DirectMessage, post::Post}};
 
 use config::{NetworkConfig, create_swarm_behaviour};
 use event_handler::EventHandler;
 use command_handler::CommandHandler;
 use types::{SwarmCommand};
 
-pub use types::{DirectMessage, FriendRequest, FriendRequestResponse, P2PMessage, P2PEvent, MyInfo};
+pub use types::{FriendRequest, FriendRequestResponse, P2PMessage, P2PEvent, MyInfo};
 pub use node::P2PNode;
 
 impl P2PNode {
@@ -111,9 +111,10 @@ async fn spawn_event_loop(
     tokio::spawn(async move {
         let mut friend_list = load_friend_list(&event_sender);
         let inbound_friend_requests = load_inbound_requests(&event_sender);
-        
+        let mut direct_messages = HashMap::new();
         let mut outbound_friend_requests = HashMap::new();
         let mut pending_friend_request_responses = HashMap::new();
+        let mut outbound_direct_messages = HashMap::new();
 
         let event_handler = EventHandler::new(event_sender.clone());
 
@@ -123,6 +124,8 @@ async fn spawn_event_loop(
                     handle_swarm_event(
                         event,
                         &mut friend_list,
+                        &mut direct_messages,
+                        &mut outbound_direct_messages,
                         &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
                         &event_handler,
@@ -138,6 +141,8 @@ async fn spawn_event_loop(
                         &inbound_friend_requests,
                         &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
+                        &mut direct_messages,
+                        &mut outbound_direct_messages,
                         &mut swarm,
                         &listen_addresses,
                         &relay_addr,
@@ -153,11 +158,13 @@ async fn spawn_event_loop(
 async fn handle_swarm_event(
     event: SwarmEvent<config::EnclaveNetworkBehaviourEvent>,
     friend_list: &mut Vec<PeerId>,
+    direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
+    outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
     outbound_requests: &mut HashMap<PeerId, FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
     event_handler: &EventHandler,
     swarm: &mut libp2p::Swarm<config::EnclaveNetworkBehaviour>,
-    listen_addresses: &Arc<Mutex<Vec<Multiaddr>>>,
+    listen_addresses: &Arc<Mutex<Vec<Multiaddr>>>
 ) {
     use config::EnclaveNetworkBehaviourEvent;
     
@@ -166,7 +173,7 @@ async fn handle_swarm_event(
             if let libp2p::gossipsub::Event::Message { propagation_source, message, .. } = gossip_event {
                 if friend_list.contains(&propagation_source) {
                     if let Ok(msg) = serde_json::from_slice::<DirectMessage>(&message.data) {
-                        let _ = event_handler.event_sender.send(P2PEvent::MessageReceived(msg));
+                        let _ = event_handler.event_sender.send(P2PEvent::DirectMessageReceived(msg));
                     }
                 }
             }
@@ -181,20 +188,18 @@ async fn handle_swarm_event(
                             P2PMessage::FriendRequest(req) => {
                                 event_handler.handle_friend_request(peer, req);
                                 
-                                let ack = P2PMessage::DirectMessage(DirectMessage {
+                                /*let ack = P2PMessage::DirectMessage(DirectMessage {
                                     from: "system".into(),
                                     content: "request_received".into(),
                                     timestamp: 0
                                 });
-                                let _ = swarm.behaviour_mut().request_response.send_response(channel, ack);
+                                let _ = swarm.behaviour_mut().request_response.send_response(channel, ack);*/
                             },
                             P2PMessage::FriendRequestResponse(response) => {
                                 event_handler.handle_friend_request_response(peer, response, friend_list, swarm);
                             },
                             P2PMessage::DirectMessage(msg) => {
-                                if msg.from != "system" && friend_list.contains(&peer) {
-                                    let _ = event_handler.event_sender.send(P2PEvent::MessageReceived(msg));
-                                }
+                                event_handler.handle_direct_message(msg, friend_list, direct_messages);
                             }
                         }
                     }
@@ -228,6 +233,7 @@ async fn handle_swarm_event(
                     &endpoint,
                     outbound_requests,
                     pending_responses,
+                    outbound_direct_messages,
                     swarm
                 )
                 .await;
@@ -246,6 +252,8 @@ async fn handle_swarm_command(
     inbound_requests: &HashMap<PeerId, FriendRequest>,
     outbound_requests: &mut HashMap<PeerId, FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
+    direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
+    outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
     swarm: &mut libp2p::Swarm<config::EnclaveNetworkBehaviour>,
     listen_addresses: &Arc<Mutex<Vec<Multiaddr>>>,
     relay_addr: &Arc<Mutex<Option<Multiaddr>>>,
@@ -253,38 +261,24 @@ async fn handle_swarm_command(
 ) {
     match cmd {
         SwarmCommand::SendMessage(content) => {
-            let topic = libp2p::gossipsub::IdentTopic::new("enclave-messages");
-            let message = DirectMessage {
-                from: swarm.local_peer_id().to_string(),
-                content,
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            };
+            /*let topic = libp2p::gossipsub::IdentTopic::new("enclave-posts");
 
-            if let Ok(data) = serde_json::to_vec(&message) {
+            if let Ok(data) = serde_json::to_vec(&post) {
                 let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
-            }
-        }
-
-        SwarmCommand::SendDirectMessage { peer, content } => {
-            if !friend_list.contains(&peer) {
-                return;
-            }
-
-            let message = P2PMessage::DirectMessage(DirectMessage {
-                from: swarm.local_peer_id().to_string(),
-                content,
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-            });
-
-            swarm.behaviour_mut().request_response.send_request(&peer, message);
-        }
-
+            }*/
+        },
+        SwarmCommand::SendDirectMessage { peer, address, content } => {
+            CommandHandler::handle_send_direct_message(
+                peer, 
+                address, 
+                content, 
+                friend_list, 
+                outbound_direct_messages, 
+                swarm,
+                event_sender
+            )
+            .await;
+        },
         SwarmCommand::SendFriendRequest { peer, address, message } => {
             CommandHandler::handle_send_friend_request(
                 peer,
@@ -296,8 +290,7 @@ async fn handle_swarm_command(
                 swarm
             )
             .await;
-        }
-
+        },
         SwarmCommand::AcceptFriendRequest(peer) => {
             CommandHandler::handle_accept_friend_request(
                 peer,
@@ -309,8 +302,7 @@ async fn handle_swarm_command(
                 event_sender
             )
             .await;
-        }
-
+        },
         SwarmCommand::DenyFriendRequest(peer) => {
             let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
                 Ok(u) => u,
@@ -323,7 +315,7 @@ async fn handle_swarm_command(
                 }
             };
 
-            if let Ok(friend_request) = db::fetch_friend_request_by_user_id(db::DATABASE.clone(), user.id) {
+            if let Ok(friend_request) = db::fetch_friend_request_by_from_user_id(db::DATABASE.clone(), user.id) {
                 let _ = db::delete_friend_request(db::DATABASE.clone(), friend_request.id);
             }
 
@@ -333,16 +325,32 @@ async fn handle_swarm_command(
             });
 
             swarm.behaviour_mut().request_response.send_request(&peer, response);
-        }
-
+        },
         SwarmCommand::GetFriendList(sender) => {
             let _ = sender.send(friend_list.clone());
-        }
-
+        },
         SwarmCommand::GetInboundFriendRequests(sender) => {
             let _ = sender.send(inbound_requests.clone());
+        },
+        SwarmCommand::GetDirectMessages { sender, peer_id } => {
+            let direct_messages_with_peer = match db::fetch_direct_messages_with_peer(db::DATABASE.clone(), peer_id.to_string()) {
+                Ok(dms) => dms,
+                Err(err) => {
+                    let _ = event_sender.send(P2PEvent::Error { context: "fetch_direct_message_with_user", error: err.to_string() });
+                    vec![]
+                }
+            };
+            direct_messages.insert(peer_id, direct_messages_with_peer);
+            let peer_direct_messages = match direct_messages.get(&peer_id) {
+                Some(dms) => dms.to_owned(),
+                None => {
+                    log::warn!("Attempted to get direct messages from Peer '{}' but none were found.", peer_id.to_string());
+                    vec![]
+                }
+            };
+            
+            let _ = sender.send(peer_direct_messages);
         }
-
         SwarmCommand::ConnectToRelay(address) => {
             log::info!("Connecting to relay: {}", address);
             let _ = swarm.dial(address.clone());
@@ -380,7 +388,7 @@ fn load_inbound_requests(event_sender: &mpsc::UnboundedSender<P2PEvent>) -> Hash
         })
         .into_iter()
         .filter_map(|req| {
-            db::fetch_user_by_id(db::DATABASE.clone(), req.user_id)
+            db::fetch_user_by_id(db::DATABASE.clone(), req.from_user_id)
                 .ok()
                 .and_then(|user| {
                     PeerId::from_str(&user.peer_id)

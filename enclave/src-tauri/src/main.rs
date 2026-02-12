@@ -10,10 +10,10 @@ use log::LevelFilter;
 use p2p::{P2PNode, P2PEvent};
 use tauri::Emitter;
 use tokio::sync::Mutex;
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 use libp2p::{PeerId, Multiaddr};
 
-use crate::{logger::Logger, p2p::{FriendRequest, MyInfo}};
+use crate::{db::models::direct_message::DirectMessage, logger::Logger, p2p::{FriendRequest, MyInfo}};
 
 static LOGGER: once_cell::sync::Lazy<Logger> =
     once_cell::sync::Lazy::new(|| {
@@ -53,9 +53,12 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
     tokio::spawn(async move {
         while let Some(event) = event_receiver.recv().await {
             match event {
-                P2PEvent::MessageReceived(msg) => {
-                    app.emit("message-received", msg).ok();
+                P2PEvent::DirectMessageReceived(msg) => {
+                    app.emit("dm-received", msg).ok();
                 },
+                P2PEvent::DirectMessageSent(msg) => {
+                    app.emit("dm-sent", msg).ok();
+                }
                 P2PEvent::PeerConnected(peer) => {
                     app.emit("peer-connected", peer.to_string()).ok();
                 },
@@ -265,7 +268,21 @@ async fn send_direct_message(state: tauri::State<'_, AppState>, peer_id: String,
         }
     };
 
-    let _ = match node.send_direct_message(peer, content) {
+    let address = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer_id) {
+        Ok(user) => match Multiaddr::from_str(&user.multiaddr) {
+            Ok(address) => address,
+            Err(err) => {
+                log::error!("send_direct_message: {}", err.to_string());
+                return Err(err.to_string())
+            }
+        },
+        Err(err) => {
+            log::error!("send_direct_message: {}", err.to_string());
+            return Err(err.to_string())
+        }
+    };
+
+    let _ = match node.send_direct_message(peer, address, content) {
         Ok(_) => (),
         Err(err) => {
             log::error!("{}", err.to_string());
@@ -322,10 +339,38 @@ async fn get_inbound_friend_requests(state: tauri::State<'_, AppState>) -> Resul
         .map(|(peer_id, friend_request)| (peer_id.to_string(), friend_request.clone()))
         .collect::<Vec<(String, FriendRequest)>>();
 
-    friend_requests.iter().for_each(|fr| log::info!("key peer id: {}", fr.0));
-    friend_requests.iter().for_each(|fr| log::info!("friend request peer id: {}", fr.1.from_peer_id));
-
     Ok(friend_requests)
+}
+
+#[tauri::command]
+async fn get_direct_messages(state: tauri::State<'_, AppState>, peer_id: String) -> Result<Vec<DirectMessage>, String> {
+    let node_guard = state.p2p_node.lock().await;
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("get_direct_messages called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let peer_id = match PeerId::from_str(&peer_id) {
+        Ok(p) => p,
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let direct_messages = match node.get_direct_messages(peer_id).await {
+        Ok(dms) => dms,
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(direct_messages)
 }
 
 #[tauri::command]
@@ -381,6 +426,7 @@ fn main() {
             send_direct_message,
             get_friend_list,
             get_inbound_friend_requests,
+            get_direct_messages,
             connect_to_relay
         ])
         .run(tauri::generate_context!()) {

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::db;
+use crate::db::models::direct_message::DirectMessage;
 use crate::p2p::types::*;
 use crate::p2p::config::EnclaveNetworkBehaviour;
 
@@ -74,7 +75,7 @@ impl CommandHandler {
                 return;
             }
 
-            if let Ok(friend_request) = db::fetch_friend_request_by_user_id(db::DATABASE.clone(), user.id) {
+            if let Ok(friend_request) = db::fetch_friend_request_by_from_user_id(db::DATABASE.clone(), user.id) {
                 let _ = db::delete_friend_request(db::DATABASE.clone(), friend_request.id);
             }
 
@@ -121,6 +122,65 @@ impl CommandHandler {
                         error: err.to_string()
                     });
                     pending_responses.remove(&peer);
+                }
+            }
+        }
+    }
+
+    pub async fn handle_send_direct_message(
+        peer_id: PeerId,
+        address: Multiaddr,
+        content: String,
+        friend_list: &mut Vec<PeerId>,
+        outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
+        swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>,
+        event_sender: &tokio::sync::mpsc::UnboundedSender<P2PEvent>
+    ) {
+        log::info!("Sending direct message '{}' to {}", content, peer_id);
+        if !friend_list.contains(&peer_id) {
+            return;
+        }
+
+        let direct_message_id = match db::create_direct_message(db::DATABASE.clone(), swarm.local_peer_id().to_string(), peer_id.to_string(), content) {
+            Ok(id) => id,
+            Err(err) => {
+                let _ = event_sender.send(P2PEvent::Error { context: "create_direct_message", error: err.to_string() });
+                return;
+            }
+        };
+
+        let message = match db::fetch_direct_message_by_id(db::DATABASE.clone(), direct_message_id) {
+            Ok(dm) => dm,
+            Err(err) => {
+                let _ = event_sender.send(P2PEvent::Error { context: "fetch_direct_message_by_id", error: err.to_string() });
+                return;
+            }
+        };
+
+        let _ = event_sender.send(P2PEvent::DirectMessageSent(message.clone()));
+
+        if swarm.is_connected(&peer_id) {
+            log::info!("Already connected, sending direct message immediately");
+            swarm.behaviour_mut().request_response.send_request(&peer_id, P2PMessage::DirectMessage(message));
+        } else {
+            log::info!("Not connected, dialing before sending acceptance");
+
+            match outbound_direct_messages.get_mut(&peer_id) {
+                Some(dms) => dms.push(message),
+                None => {
+                    outbound_direct_messages.insert(peer_id, vec![message]);
+                }
+            };
+            if let Err(err) = swarm.dial(address) {
+                let _ = event_sender.send(P2PEvent::Error {
+                    context: "swarm.dial",
+                    error: err.to_string()
+                });
+                match outbound_direct_messages.get_mut(&peer_id) {
+                    Some(dms) => {
+                        dms.pop();
+                    },
+                    None => ()
                 }
             }
         }

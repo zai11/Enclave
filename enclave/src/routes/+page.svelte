@@ -3,10 +3,19 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
 
-  interface Message {
+  interface Post {
     from: string;
     content: string;
     timestamp: number;
+  }
+
+  interface DirectMessage {
+    from_peer_id: string;
+    to_peer_id: string;
+    content: string;
+    created_at: number;
+    edited_at: number;
+    read: boolean;
   }
 
   interface FriendInfo {
@@ -22,11 +31,11 @@
 
   let myPeerId = '';
   let myInfo: FriendInfo | null = null;
-  let messages: Message[] = [];
+  let posts: Post[] = [];
   let connectedPeers: string[] = [];
   let friendList: string[] = [];
   let pendingRequests: Array<[string, FriendRequest]> = [];
-  let messageInput = '';
+  let postInput = '';
   let addFriendAddress = '';
   let addFriendMessage = '';
   let relayAddress = '';
@@ -43,6 +52,10 @@
   let nicknames = new Map<string, string>();
   let editingPeer: string | null = null;
   let draftNickname = '';
+  let directMessageOpen = false;
+  let activeDMPeerId: string | null = null;
+  let directMessages: DirectMessage[] = [];
+  let directMessageInput = '';
 
   onMount(async () => {
     if (!("__TAURI_INTERNALS__" in window)) {
@@ -51,8 +64,18 @@
     }
 
     // Listen for P2P events:
-    await listen('message-received', (event: any) => {
-      messages = [...messages, event.payload];
+    await listen('post-received', (event: any) => {
+      console.log(event.payload);
+      posts = [...posts, event.payload];
+    });
+
+    await listen('dm-received', (event: any) => {
+      console.log(event.payload);
+      directMessages = [...directMessages, event.payload];
+    });
+
+    await listen('dm-sent', (event: any) => {
+      directMessages = [...directMessages, event.payload];
     });
 
     await listen('peer-connected', (event: any) => {
@@ -128,15 +151,15 @@
     }
   }
 
-  async function sendMessage() {
-    if (!messageInput.trim()) return;
+  async function sendPost() {
+    if (!postInput.trim()) return;
 
     try {
-      await invoke('send_message', { content: messageInput });
-      messageInput = '';
+      await invoke('send_post', { content: postInput });
+      postInput = '';
     } catch (error) {
-      console.error('Failed to send message:', error);
-      alert('Failed to send message: ' + error);
+      console.error('Failed to send post:', error);
+      alert('Failed to send post: ' + error);
     }
   }
 
@@ -298,11 +321,48 @@
 
   function displayName(peerId: string): string {
     let name = nicknames.get(peerId) ?? peerId;
-    if (name.length > 16) {
-      return name.slice(0, 16) + '...';
+    if (name.length > 24) {
+      return name.slice(0, 24) + '...';
     }
     else {
       return name;
+    }
+  }
+
+  function autoScroll(node: HTMLElement) {
+    const observer = new MutationObserver(() => {
+      node.scrollTop = node.scrollHeight;
+    });
+
+    observer.observe(node, { childList: true, subtree: true });
+
+    return {
+      destroy() {
+        observer.disconnect();
+      }
+    };
+  }
+
+  async function sendDirectMessage() {
+    if (!directMessageInput.trim()) return;
+
+    try {
+      await invoke('send_direct_message', { peerId: activeDMPeerId ?? '', content: directMessageInput });
+      directMessageInput = '';
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      alert('Failed to send message: ' + error);
+    }
+  }
+
+  async function openDirectMessages(peerId: string) {
+    try {
+      activeDMPeerId = peerId;
+      directMessages = await invoke('get_direct_messages', { peerId: activeDMPeerId })
+      directMessageOpen = true;
+    } catch (error) {
+      console.error('Failed to get direct messages:', error);
+      alert('Failed to get direct messages: ' + error);
     }
   }
 </script>
@@ -388,26 +448,26 @@
 
         <!-- Main Content -->
         <div class="main-content">
-          <div class="messages">
-            {#if messages.length === 0}
-              <div class="empty-messages">
+          <div class="posts">
+            {#if posts.length === 0}
+              <div class="empty-posts">
                 <p>No messages yet. Start a conversation!</p>
               </div>
             {:else}
-              {#each messages as message}
-                <div class="message">
-                  <div class="message-header">
-                    <span class="message-from">{message.from.slice(0, 16)}...</span>
-                    <span class="message-time">{formatTime(message.timestamp)}</span>
+              {#each posts as post}
+                <div class="post">
+                  <div class="post-header">
+                    <span class="post-from">{post.from.slice(0, 16)}...</span>
+                    <span class="post-time">{formatTime(post.timestamp)}</span>
                   </div>
-                  <div class="message-content">{message.content}</div>
+                  <div class="post-content">{post.content}</div>
                 </div>
               {/each}
             {/if}
           </div>
-          <div class="message-input">
-            <input type="text" bind:value={messageInput} on:keypress={(e) => e.key === 'Enter' && sendMessage()} placeholder='Type a message...' />
-            <button on:click={sendMessage} class="btn-primary">Send</button>
+          <div class="post-input">
+            <input type="text" bind:value={postInput} on:keypress={(e) => e.key === 'Enter' && sendPost()} placeholder='Type a Post...' />
+            <button on:click={sendPost} class="btn-primary">Send</button>
           </div>
         </div>
       </div>
@@ -531,6 +591,51 @@
           </div>
         </div>
       {/if}
+
+      <!-- Direct Messages Launcher -->
+      <div class="dm-launcher">
+        <div class="dm-header" on:click={() => directMessageOpen = !directMessageOpen}>
+          <span>Messages</span>
+          <span class="chevron">{directMessageOpen ? '▾' : '▴'}</span>
+        </div>
+        {#if directMessageOpen}
+          <div class="dm-friend-list">
+            {#if friendList.length === 0}
+              <div class="dm-empty">No friends</div>
+            {:else}
+              {#each friendList as friend}
+                <div class="dm-friend" on:click={() => openDirectMessages(friend)}>
+                  {displayName(friend)}
+                </div>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
+
+      <!-- Active DM Window -->
+      {#if activeDMPeerId}
+        <div class="dm-window">
+          <div class="dm-window-header">
+            <span>{displayName(activeDMPeerId)}</span>
+            <button on:click={() => activeDMPeerId = null}>✕</button>
+          </div>
+
+          <div class="dm-messages" use:autoScroll>
+            {#each directMessages as msg}
+              <div class="dm-message {msg.from_peer_id === myPeerId ? 'outgoing' : 'incoming'}">
+                <div class="dm-content">{msg.content}</div>
+                <div class="dm-time">{formatTime(msg.created_at)}</div>
+              </div>
+            {/each}
+          </div>
+
+          <div class="dm-input">
+            <input type="text" bind:value={directMessageInput} placeholder="Type a message..." on:keydown={(e) => e.key === 'Enter' && sendDirectMessage()} />
+            <button on:click={sendDirectMessage}>Send</button>
+          </div>
+        </div>
+      {/if}
     {/if}
   </div>
 </main>
@@ -646,13 +751,13 @@
     flex-direction: column;
   }
 
-  .messages {
+  .posts {
     flex: 1;
     overflow-y: auto;
     padding: 20px;
   }
 
-  .empty-messages {
+  .empty-posts {
     height: 100%;
     display: flex;
     align-items: center;
@@ -660,41 +765,41 @@
     color: #999;
   }
 
-  .message {
+  .post {
     margin-bottom: 16px;
     padding: 12px;
     background-color: #f5f5f5;
     border-radius: 8px;
   }
 
-  .message-header {
+  .post-header {
     display: flex;
     justify-content: space-between;
     margin-bottom: 4px;
     font-size: 12px;
   }
 
-  .message-from {
+  .post-from {
     font-weight: 600;
     color: #333;
   }
 
-  .message-time {
+  .post-time {
     color: #999;
   }
 
-  .message-content {
+  .post-content {
     color: #333;
   }
 
-  .message-input {
+  .post-input {
     display: flex;
     gap: 8px;
     padding: 20px;
     border-top: 1px solid #eee;
   }
 
-  .message-input input {
+  .post-input input {
     flex: 1;
     padding: 12px;
     border: 1px solid #ddd;
@@ -943,5 +1048,146 @@
   .status-badge.disconnected {
     background-color: #fafafa;
     color: #757575;
+  }
+
+  .dm-launcher {
+    position: fixed;
+    bottom: 0;
+    right: 16px;
+    width: 260px;
+    background: white;
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+    z-index: 9000;
+    font-size: 14px;
+  }
+
+  .dm-header {
+    padding: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    background-color: #0051df;
+    color: white;
+  }
+
+  .dm-friend-list {
+    max-height: 300px;
+    overflow-y: auto;
+    background-color: #f5f5f5;
+  }
+
+  .dm-friend {
+    padding: 10px 12px;
+    font-family: monospace;
+    cursor: pointer;
+    border-bottom: 1px solid #e0e0e0;
+  }
+
+  .dm-friend:hover {
+    background-color: #e8e8e8;
+  }
+
+  .dm-empty {
+    padding: 16px;
+    text-align: center;
+    color: #777;
+  }
+
+  .dm-window {
+    position: fixed;
+    bottom: 0;
+    right: 292px;
+    width: 320px;
+    height: 420px;
+    background-color: #fff;
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+    z-index: 9000;
+  }
+
+  .dm-window-header {
+    padding: 12px;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #f5f5f5;
+    border-bottom: 1px solid #ddd;
+  }
+
+  .dm-window-header button {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font-size: 16px;
+  }
+
+  .dm-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .dm-message {
+    max-width: 75%;
+  }
+
+  .dm-message.incoming {
+    align-self: flex-start;
+  }
+
+  .dm-message.outgoing {
+    align-self: flex-end;
+    text-align: right;
+  }
+
+  .dm-content { 
+    background-color: #f0f0f0;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+  }
+
+  .dm-message.outgoing .dm-content {
+    background-color: #007aff;
+    color: white;
+  }
+
+  .dm-time {
+    font-size: 10px;
+    color: #999;
+    margin-top: 2px;
+  }
+
+  .dm-input {
+    display: flex;
+    gap: 8px;
+    padding: 10px;
+    border-top: 1px solid #ddd;
+  }
+
+  .dm-input input {
+    flex: 1;
+    padding: 8px;
+    font-size: 13px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+  }
+
+  .dm-input button {
+    padding: 8px 12px;
+    border: none;
+    border-radius: 6px;
+    background-color: #007aff;
+    color: #fff;
+    cursor: pointer;
   }
 </style>

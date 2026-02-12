@@ -1,12 +1,10 @@
+use std::collections::HashMap;
+
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot::Sender;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DirectMessage {
-    pub from: String,
-    pub content: String,
-    pub timestamp: u64
-}
+use crate::db::models::direct_message::DirectMessage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FriendRequest {
@@ -37,7 +35,8 @@ pub enum P2PMessage {
 
 #[derive(Debug, Clone)]
 pub enum P2PEvent {
-    MessageReceived(DirectMessage),
+    DirectMessageReceived(DirectMessage),
+    DirectMessageSent(DirectMessage),
     PeerConnected(PeerId),
     PeerDisconnected(PeerId),
     FriendRequestReceived { from: PeerId, request: FriendRequest },
@@ -48,11 +47,12 @@ pub enum P2PEvent {
 
 pub(crate) enum SwarmCommand {
     SendMessage(String),
-    SendDirectMessage { peer: PeerId, content: String },
+    SendDirectMessage { peer: PeerId, address: libp2p::Multiaddr, content: String },
     SendFriendRequest { peer: PeerId, address: libp2p::Multiaddr, message: String },
     AcceptFriendRequest(PeerId),
     DenyFriendRequest(PeerId),
-    GetFriendList(tokio::sync::oneshot::Sender<Vec<PeerId>>),
-    GetInboundFriendRequests(tokio::sync::oneshot::Sender<std::collections::HashMap<PeerId, FriendRequest>>),
+    GetFriendList(Sender<Vec<PeerId>>),
+    GetInboundFriendRequests(Sender<HashMap<PeerId, FriendRequest>>),
+    GetDirectMessages { sender: Sender<Vec<DirectMessage>>, peer_id: PeerId },
     ConnectToRelay(libp2p::Multiaddr)
 }

@@ -1,7 +1,9 @@
 use libp2p::{PeerId};
 use std::collections::HashMap;
+use std::str::FromStr;
 use tokio::sync::mpsc;
 use crate::db;
+use crate::db::models::direct_message::DirectMessage;
 use crate::p2p::types::*;
 use crate::p2p::config::EnclaveNetworkBehaviour;
 
@@ -20,6 +22,7 @@ impl EventHandler {
         endpoint: &libp2p_core::connection::ConnectedPoint,
         outbound_requests: &mut HashMap<PeerId, FriendRequest>,
         pending_responses: &mut HashMap<PeerId, P2PMessage>,
+        outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
         swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>
     ) {
         log::info!("Connected to peer: {peer_id}");
@@ -30,7 +33,7 @@ impl EventHandler {
             libp2p_core::connection::ConnectedPoint::Listener { send_back_addr, .. } => send_back_addr.clone()
         };
 
-        if let Err(err) = db::create_user(db::DATABASE.clone(), peer_id.to_string(), multiaddr.to_string()) {
+        if let Err(err) = db::create_user(db::DATABASE.clone(), peer_id.to_string(), multiaddr.to_string(), false) {
             let _ = self.event_sender.send(P2PEvent::Error {
                 context: "create_user",
                 error: err.to_string()
@@ -49,6 +52,15 @@ impl EventHandler {
             swarm.behaviour_mut()
                 .request_response
                 .send_request(&peer_id, response);
+        }
+
+        if let Some(dms) = outbound_direct_messages.remove(&peer_id) {
+            log::info!("Sending {} buffered direct messages to {}", dms.len(), peer_id);
+            dms.iter().for_each(|dm| {
+                swarm.behaviour_mut()
+                    .request_response
+                    .send_request(&peer_id, P2PMessage::DirectMessage(dm.to_owned()));
+            });
         }
     }
 
@@ -120,6 +132,44 @@ impl EventHandler {
             let _ = self.event_sender.send(P2PEvent::FriendRequestAccepted { peer });
         } else {
             let _ = self.event_sender.send(P2PEvent::FriendRequestDenied { peer });
+        }
+    }
+
+    pub fn handle_direct_message(
+        &self,
+        msg: DirectMessage,
+        friend_list: &Vec<PeerId>,
+        direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>
+    ) {
+        log::info!("Received direct message '{}' from {}", msg.content, msg.from_peer_id);
+
+        let from_peer_id = match PeerId::from_str(&msg.from_peer_id) {
+            Ok(p) => p,
+            Err(err) => {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "PeerId::from_str", error: err.to_string() });
+                return;
+            }
+        };
+
+        let identity_peer_id = match db::fetch_identity(db::DATABASE.clone()) {
+            Ok(id) => id.peer_id,
+            Err(err) => {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "fetch_identity", error: err.to_string() });
+                return;
+            }
+        };
+
+        if friend_list.contains(&from_peer_id) {
+            if let Err(err) = db::create_direct_message(db::DATABASE.clone(), msg.from_peer_id.clone(), identity_peer_id, msg.content.clone()) {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "create_direct_message", error: err.to_string() });
+            }
+
+            let mut current_messages = direct_messages.remove(&from_peer_id).unwrap_or(vec![]);
+            current_messages.push(msg.clone());
+
+            direct_messages.insert(from_peer_id, current_messages);
+
+            let _ = self.event_sender.send(P2PEvent::DirectMessageReceived(msg));
         }
     }
 }

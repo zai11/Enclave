@@ -41,6 +41,13 @@ impl NetworkConfig {
                 peer_id.to_string(),
                 port
             )?;
+
+            db::create_user(
+                db::DATABASE.clone(), 
+                peer_id.to_string(), 
+                format!("/ip4/0.0.0.0/tcp/{}", port), 
+                true
+            )?;
             
             Ok(Self { keypair, peer_id, port })
         }
