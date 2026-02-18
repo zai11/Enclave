@@ -4,6 +4,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use crate::db;
 use crate::db::models::direct_message::DirectMessage;
+use crate::db::models::post::Post;
 use crate::p2p::types::*;
 use crate::p2p::config::EnclaveNetworkBehaviour;
 
@@ -171,5 +172,29 @@ impl EventHandler {
 
             let _ = self.event_sender.send(P2PEvent::DirectMessageReceived(msg));
         }
+    }
+
+    pub fn handle_post(
+        &self,
+        src_peer_id: PeerId,
+        post: Post,
+        friend_list: &Vec<PeerId>,
+        displayed_posts: &mut Vec<Post>,
+    ) {
+        log::info!("Received post '{}' from {}", post.content, post.author_peer_id);
+
+        if !friend_list.contains(&src_peer_id) {
+            log::warn!("Post received from non-friend peer.");
+            return;
+        }
+
+        if let Err(err) = db::create_post(db::DATABASE.clone(), post.author_peer_id.clone(), post.content.clone()) {
+            let _ = self.event_sender.send(P2PEvent::Error { context: "create_post", error: err.to_string() });
+            return;
+        };
+
+        displayed_posts.push(post.clone());
+
+        let _ = self.event_sender.send(P2PEvent::PostRecieved(post));
     }
 }

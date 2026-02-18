@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use std::{str::FromStr, sync::Arc};
 use libp2p::{PeerId, Multiaddr};
 
-use crate::{db::models::direct_message::DirectMessage, logger::Logger, p2p::{FriendRequest, MyInfo}};
+use crate::{db::models::{direct_message::DirectMessage, post::Post}, logger::Logger, p2p::{FriendRequest, MyInfo}};
 
 static LOGGER: once_cell::sync::Lazy<Logger> =
     once_cell::sync::Lazy::new(|| {
@@ -49,6 +49,7 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
 
     app.emit("refresh-inbound-friend-requests", ()).ok();
     app.emit("refresh-friend-list", ()).ok();
+    app.emit("load-feed", ()).ok();
 
     tokio::spawn(async move {
         while let Some(event) = event_receiver.recv().await {
@@ -58,7 +59,13 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
                 },
                 P2PEvent::DirectMessageSent(msg) => {
                     app.emit("dm-sent", msg).ok();
-                }
+                },
+                P2PEvent::PostRecieved(post) => {
+                    app.emit("post-received", post).ok();
+                },
+                P2PEvent::PostSent(post) => {
+                    app.emit("post-sent", post).ok();
+                },
                 P2PEvent::PeerConnected(peer) => {
                     app.emit("peer-connected", peer.to_string()).ok();
                 },
@@ -226,18 +233,18 @@ async fn deny_friend_request(state: tauri::State<'_, AppState>, peer_id: String)
 }
 
 #[tauri::command]
-async fn send_message(state: tauri::State<'_, AppState>, content: String) -> Result<(), String> {
+async fn send_post(state: tauri::State<'_, AppState>, content: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
 
     let node = match node_guard.as_ref() {
         Some(node) => node,
         None => {
-            log::warn!("send_message called but P2P node not started");
+            log::warn!("send_post called but P2P node not started");
             return Err("P2P node not started".into());
         }
     };
 
-    let _ = match node.send_message(content) {
+    let _ = match node.send_post(content) {
         Ok(_) => (),
         Err(err) => {
             log::error!("{}", err.to_string());
@@ -374,6 +381,60 @@ async fn get_direct_messages(state: tauri::State<'_, AppState>, peer_id: String)
 }
 
 #[tauri::command]
+async fn load_feed(state: tauri::State<'_, AppState>) -> Result<Vec<Post>, String> {
+    let node_guard = state.p2p_node.lock().await;
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("load_feed called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let posts = match node.load_feed().await {
+        Ok(p) => p,
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(posts)
+}
+
+#[tauri::command]
+async fn load_board(state: tauri::State<'_, AppState>, peer_id: String) -> Result<Vec<Post>, String> {
+    let node_guard = state.p2p_node.lock().await;
+
+    let node = match node_guard.as_ref() {
+        Some(node) => node,
+        None => {
+            log::warn!("load_board called but P2P node not started");
+            return Err("P2P node not started".into());
+        }
+    };
+
+    let peer_id = match PeerId::from_str(&peer_id) {
+        Ok(p) => p,
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    let posts = match node.load_board(peer_id).await {
+        Ok(p) => p,
+        Err(err) => {
+            log::error!("{}", err.to_string());
+            return Err(err.to_string());
+        }
+    };
+
+    Ok(posts)
+}
+
+#[tauri::command]
 async fn connect_to_relay(state: tauri::State<'_, AppState>, relay_address: String) -> Result<(), String> {
     let node_guard = state.p2p_node.lock().await;
 
@@ -422,11 +483,13 @@ fn main() {
             send_friend_request,
             accept_friend_request,
             deny_friend_request,
-            send_message,
+            send_post,
             send_direct_message,
             get_friend_list,
             get_inbound_friend_requests,
             get_direct_messages,
+            load_feed,
+            load_board,
             connect_to_relay
         ])
         .run(tauri::generate_context!()) {
