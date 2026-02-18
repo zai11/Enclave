@@ -80,11 +80,10 @@ pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
     if !db.table_exists(None, "tbl_posts")? {
         db.execute("CREATE TABLE tbl_posts (
                             id INTEGER PRIMARY KEY,
-                            author_user_id INTEGER NOT NULL,
+                            author_peer_id INTEGER NOT NULL,
                             content TEXT NOT NULL,
                             created_at INTEGER NOT NULL,
-                            edited_at INTEGER,
-                            FOREIGN KEY (author_user_id) REFERENCES tbl_users(id)
+                            edited_at INTEGER
                         );", ())?;
         log::info!("Created posts table.");
     }
@@ -99,9 +98,6 @@ pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
                         );", ())?;
         log::info!("Created blocked users table.");
     }
-
-    db.execute("CREATE INDEX IF NOT EXISTS idx_posts_author ON tbl_posts(author_user_id);", ())?;
-    db.execute("CREATE INDEX IF NOT EXISTS idx_users_peer_id ON tbl_users(peer_id);", ())?;
 
     Ok(Arc::new(Mutex::new(db)))
 }
@@ -641,20 +637,20 @@ pub fn fetch_post_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Result<P
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, author_user_id, content, created_at, edited_at FROM tbl_posts WHERE id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, author_peer_id, content, created_at, edited_at FROM tbl_posts WHERE id=?1;")?;
 
     if !query.exists(rusqlite::params![id])? {
         return Err(anyhow::anyhow!("A post with id {id} was not found."));
     }
 
-    let (id, author_user_id, content, created_at, edited_at): (i64, i64, String, i64, Option<i64>) = query.query_row(rusqlite::params![id], |row| {
+    let (id, author_peer_id, content, created_at, edited_at): (i64, String, String, i64, Option<i64>) = query.query_row(rusqlite::params![id], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
     })?;
 
     Ok(
         Post::new(
             id,
-            author_user_id,
+            author_peer_id,
             content,
             created_at,
             edited_at
@@ -666,7 +662,7 @@ pub fn fetch_all_posts(db: Arc<Mutex<Connection>>) -> anyhow::Result<Vec<Post>> 
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, author_user_id, content, created_at, edited_at FROM tbl_posts;")?;
+    let mut query = db_guard.prepare("SELECT id, author_peer_id, content, created_at, edited_at FROM tbl_posts ORDER BY created_at ASC;")?;
 
     if !query.exists(())? {
         return Err(anyhow::anyhow!("No post data was found."));
@@ -697,17 +693,17 @@ pub fn fetch_all_posts(db: Arc<Mutex<Connection>>) -> anyhow::Result<Vec<Post>> 
     }).collect::<anyhow::Result<Vec<Post>>>()
 }
 
-pub fn fetch_posts_from_user(db: Arc<Mutex<Connection>>, user_id: i64) -> anyhow::Result<Vec<Post>> {
+pub fn fetch_posts_from_peer(db: Arc<Mutex<Connection>>, peer_id: String) -> anyhow::Result<Vec<Post>> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, author_user_id, content, created_at, edited_at FROM tbl_posts WHERE author_user_id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, author_peer_id, content, created_at, edited_at FROM tbl_posts WHERE author_peer_id=?1;")?;
 
-    if !query.exists(rusqlite::params![user_id])? {
-        return Err(anyhow::anyhow!("No posts were found from user {user_id}."));
+    if !query.exists(rusqlite::params![peer_id])? {
+        return Err(anyhow::anyhow!("No posts were found from user {peer_id}."));
     }
 
-    let rows = query.query_map(rusqlite::params![user_id], |row| {
+    let rows = query.query_map(rusqlite::params![peer_id], |row| {
         Ok((
             row.get(0)?,
             row.get(1)?,
@@ -732,15 +728,15 @@ pub fn fetch_posts_from_user(db: Arc<Mutex<Connection>>, user_id: i64) -> anyhow
     }).collect::<anyhow::Result<Vec<Post>>>()
 }
 
-pub fn create_post(db: Arc<Mutex<Connection>>, author_user_id: i64, content: String) -> anyhow::Result<i64> {
+pub fn create_post(db: Arc<Mutex<Connection>>, author_peer_id: String, content: String) -> anyhow::Result<i64> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
     let created_at = chrono::Utc::now().timestamp();
 
     db_guard.execute(
-        "INSERT INTO tbl_posts (author_user_id, content, created_at) VALUES (?1, ?2, ?3);", 
-        rusqlite::params![author_user_id, content, created_at]
+        "INSERT INTO tbl_posts (author_peer_id, content, created_at) VALUES (?1, ?2, ?3);", 
+        rusqlite::params![author_peer_id, content, created_at]
     )?;
 
     Ok(db_guard.last_insert_rowid())
@@ -1626,7 +1622,7 @@ pub mod test {
     }
 
     #[test]
-    pub fn test_fetch_direct_messages_with_user_errors_invalid_user_id() {
+    pub fn test_fetch_direct_messages_with_peer_errors_invalid_user_id() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let result = fetch_direct_messages_with_peer(db.clone(), "Invalid peer id".into());
@@ -1636,7 +1632,7 @@ pub mod test {
     }
 
     #[test]
-    pub fn test_fetch_direct_messages_with_user_correctly_fetches_direct_message_data() {
+    pub fn test_fetch_direct_messages_with_peer_correctly_fetches_direct_message_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
@@ -1806,24 +1802,12 @@ pub mod test {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
 
         let post_id: i64 = {
             let conn = db.lock().unwrap();
             conn.execute(
-                "INSERT INTO tbl_posts (author_user_id, content, created_at) VALUES (?1, ?2, ?3);",
-                rusqlite::params![user_id, "My first post", 0]
+                "INSERT INTO tbl_posts (author_peer_id, content, created_at) VALUES (?1, ?2, ?3);",
+                rusqlite::params![peer_id, "My first post", 0]
             ).unwrap();
             conn.last_insert_rowid()
         };
@@ -1831,7 +1815,7 @@ pub mod test {
         let post = fetch_post_by_id(db.clone(), post_id).expect("fetch_post_by_id failed");
 
         assert_eq!(post.id, post_id);
-        assert_eq!(post.author_user_id, user_id);
+        assert_eq!(post.author_peer_id, peer_id);
         assert_eq!(post.content, "My first post");
         assert_eq!(post.created_at, 0);
         assert!(post.edited_at.is_none());
@@ -1852,27 +1836,15 @@ pub mod test {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
 
         let conn = db.lock().unwrap();
         conn.execute(
-            "INSERT INTO tbl_posts (author_user_id, content, created_at) VALUES (?1, ?2, ?3);",
-            rusqlite::params![user_id, "Post 1", 0]
+            "INSERT INTO tbl_posts (author_peer_id, content, created_at) VALUES (?1, ?2, ?3);",
+            rusqlite::params![peer_id, "Post 1", 0]
         ).unwrap();
         conn.execute(
-            "INSERT INTO tbl_posts (author_user_id, content, created_at) VALUES (?1, ?2, ?3);",
-            rusqlite::params![user_id, "Post 2", 0]
+            "INSERT INTO tbl_posts (author_peer_id, content, created_at) VALUES (?1, ?2, ?3);",
+            rusqlite::params![peer_id, "Post 2", 0]
         ).unwrap();
         drop(conn);
 
@@ -1887,42 +1859,30 @@ pub mod test {
     pub fn test_fetch_posts_from_user_errors_invalid_user_id() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        let result = fetch_posts_from_user(db.clone(), 999);
+        let result = fetch_posts_from_peer(db.clone(), "Invalid peer id".into());
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No posts were found from user"));
+        assert!(result.unwrap_err().to_string().contains("No posts were found from peer"));
     }
 
     #[test]
-    pub fn test_fetch_posts_from_user_correctly_fetches_post_data() {
+    pub fn test_fetch_posts_from_peer_correctly_fetches_post_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
 
         let conn = db.lock().unwrap();
         conn.execute(
-            "INSERT INTO tbl_posts (author_user_id, content, created_at) VALUES (?1, ?2, ?3);",
-            rusqlite::params![user_id, "User Post 1", 0]
+            "INSERT INTO tbl_posts (author_peer_id, content, created_at) VALUES (?1, ?2, ?3);",
+            rusqlite::params![peer_id, "User Post 1", 0]
         ).unwrap();
         conn.execute(
-            "INSERT INTO tbl_posts (author_user_id, content, created_at) VALUES (?1, ?2, ?3);",
-            rusqlite::params![user_id, "User Post 2", 0]
+            "INSERT INTO tbl_posts (author_peer_id, content, created_at) VALUES (?1, ?2, ?3);",
+            rusqlite::params![peer_id, "User Post 2", 0]
         ).unwrap();
         drop(conn);
 
-        let posts = fetch_posts_from_user(db.clone(), user_id).expect("fetch_posts_from_user failed");
+        let posts = fetch_posts_from_peer(db.clone(), peer_id).expect("fetch_posts_from_peer failed");
 
         assert_eq!(posts.len(), 2);
         assert!(posts.iter().any(|p| p.content == "User Post 1"));
@@ -1934,33 +1894,13 @@ pub mod test {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
-        create_user(db.clone(), peer_id.to_string(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
-
-        create_post(db.clone(), user_id, "Hello World".to_string()).unwrap();
-
-        let post_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_posts LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
+        let post_id = create_post(db.clone(), peer_id.clone(), "Hello World".to_string()).unwrap();
 
         let post = fetch_post_by_id(db.clone(), post_id).expect("Failed to fetch post");
+
         assert_eq!(post.content, "Hello World");
-        assert_eq!(post.author_user_id, user_id);
+        assert_eq!(post.author_peer_id, peer_id);
         assert!(post.created_at > 0);
         assert!(post.edited_at.is_none());
     }
@@ -1970,29 +1910,8 @@ pub mod test {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
-        create_user(db.clone(), peer_id.to_string(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
-
-        create_post(db.clone(), user_id, "Original Content".to_string()).unwrap();
-
-        let post_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_posts LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
+        let post_id = create_post(db.clone(), peer_id.clone(), "Original Content".to_string()).unwrap();
 
         update_post(db.clone(), post_id, "Updated Content".to_string()).unwrap();
 
@@ -2006,29 +1925,8 @@ pub mod test {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
 
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
-
-        create_post(db.clone(), user_id, "To be deleted".to_string()).unwrap();
-
-        let post_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_posts LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
+        let post_id = create_post(db.clone(), peer_id.clone(), "To be deleted".to_string()).unwrap();
 
         delete_post(db.clone(), post_id).unwrap();
 

@@ -185,4 +185,35 @@ impl CommandHandler {
             }
         }
     }
+
+    pub async fn handle_send_post(
+        content: String,
+        swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>,
+        event_sender: &tokio::sync::mpsc::UnboundedSender<P2PEvent>
+    ) {
+        log::info!("Sending post '{}' to all friends", content);
+        let topic = libp2p::gossipsub::IdentTopic::new("enclave-posts");
+        
+        let post_id = match db::create_post(db::DATABASE.clone(), swarm.local_peer_id().to_string(), content) {
+            Ok(p) => p,
+            Err(err) => {
+                let _ = event_sender.send(P2PEvent::Error { context: "create_post", error: err.to_string() });
+                return;
+            }
+        };
+
+        let post = match db::fetch_post_by_id(db::DATABASE.clone(), post_id) {
+            Ok(p) => p,
+            Err(err) => {
+                let _ = event_sender.send(P2PEvent::Error { context: "fetch_post_by_id", error: err.to_string() });
+                return;
+            }
+        };
+
+        if let Ok(data) = serde_json::to_vec(&post) {
+            let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
+        }
+
+        let _ = event_sender.send(P2PEvent::PostSent(post));
+    }
 }

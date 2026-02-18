@@ -2,7 +2,7 @@ use libp2p::{Multiaddr, PeerId, identity::Keypair};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, Mutex};
-use crate::{db::models::direct_message::DirectMessage, p2p::types::*};
+use crate::{db::models::{direct_message::DirectMessage, post::Post}, p2p::types::*};
 
 pub struct P2PNode {
     pub peer_id: PeerId,
@@ -41,8 +41,8 @@ impl P2PNode {
         Ok(())
     }
 
-    pub fn send_message(&self, content: String) -> anyhow::Result<()> {
-        self.swarm_sender.send(SwarmCommand::SendMessage(content))?;
+    pub fn send_post(&self, content: String) -> anyhow::Result<()> {
+        self.swarm_sender.send(SwarmCommand::SendPost(content))?;
         Ok(())
     }
 
@@ -76,6 +76,18 @@ impl P2PNode {
     pub async fn get_direct_messages(&self, peer_id: PeerId) -> anyhow::Result<Vec<DirectMessage>> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.swarm_sender.send(SwarmCommand::GetDirectMessages{ sender, peer_id })?;
+        Ok(receiver.await?)
+    }
+
+    pub async fn load_feed(&self) -> anyhow::Result<Vec<Post>> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.swarm_sender.send(SwarmCommand::LoadFeed(sender))?;
+        Ok(receiver.await?)
+    }
+
+    pub async fn load_board(&self, peer_id: PeerId) -> anyhow::Result<Vec<Post>> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.swarm_sender.send(SwarmCommand::LoadBoard{ sender, peer_id })?;
         Ok(receiver.await?)
     }
 

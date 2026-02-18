@@ -49,7 +49,7 @@ impl P2PNode {
 
         swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", config.port).parse()?)?;
 
-        let topic = libp2p::gossipsub::IdentTopic::new("enclave-messages");
+        let topic = libp2p::gossipsub::IdentTopic::new("enclave-posts");
         swarm.behaviour_mut().gossipsub.subscribe(&topic)?;
 
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
@@ -112,6 +112,7 @@ async fn spawn_event_loop(
         let mut friend_list = load_friend_list(&event_sender);
         let inbound_friend_requests = load_inbound_requests(&event_sender);
         let mut direct_messages = HashMap::new();
+        let mut displayed_posts = Vec::new();
         let mut outbound_friend_requests = HashMap::new();
         let mut pending_friend_request_responses = HashMap::new();
         let mut outbound_direct_messages = HashMap::new();
@@ -126,6 +127,7 @@ async fn spawn_event_loop(
                         &mut friend_list,
                         &mut direct_messages,
                         &mut outbound_direct_messages,
+                        &mut displayed_posts,
                         &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
                         &event_handler,
@@ -160,6 +162,7 @@ async fn handle_swarm_event(
     friend_list: &mut Vec<PeerId>,
     direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
     outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
+    displayed_posts: &mut Vec<Post>,
     outbound_requests: &mut HashMap<PeerId, FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
     event_handler: &EventHandler,
@@ -171,10 +174,8 @@ async fn handle_swarm_event(
     match event {
         SwarmEvent::Behaviour(EnclaveNetworkBehaviourEvent::Gossipsub(gossip_event)) => {
             if let libp2p::gossipsub::Event::Message { propagation_source, message, .. } = gossip_event {
-                if friend_list.contains(&propagation_source) {
-                    if let Ok(msg) = serde_json::from_slice::<DirectMessage>(&message.data) {
-                        let _ = event_handler.event_sender.send(P2PEvent::DirectMessageReceived(msg));
-                    }
+                if let Ok(post) = serde_json::from_slice::<Post>(&message.data) {
+                    event_handler.handle_post(propagation_source, post, friend_list, displayed_posts);
                 }
             }
         },
@@ -183,17 +184,10 @@ async fn handle_swarm_event(
             
             match req_event {
                 reqres::Event::Message { peer, message, .. } => {
-                    if let reqres::Message::Request { request, channel, .. } = message {
+                    if let reqres::Message::Request { request, .. } = message {
                         match request {
                             P2PMessage::FriendRequest(req) => {
                                 event_handler.handle_friend_request(peer, req);
-                                
-                                /*let ack = P2PMessage::DirectMessage(DirectMessage {
-                                    from: "system".into(),
-                                    content: "request_received".into(),
-                                    timestamp: 0
-                                });
-                                let _ = swarm.behaviour_mut().request_response.send_response(channel, ack);*/
                             },
                             P2PMessage::FriendRequestResponse(response) => {
                                 event_handler.handle_friend_request_response(peer, response, friend_list, swarm);
@@ -205,10 +199,10 @@ async fn handle_swarm_event(
                     }
                 },
                 reqres::Event::OutboundFailure { peer, request_id, error, .. } => {
-                    log::info!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
+                    log::error!("Outbound request {:?} to {} failed {:?}", request_id, peer, error);
                 },
                 reqres::Event::InboundFailure { peer, request_id, error, .. } => {
-                    log::info!("Inbound request {:?} from {} failed {:?}", request_id, peer, error);
+                    log::error!("Inbound request {:?} from {} failed {:?}", request_id, peer, error);
                 },
                 _ => {}
             }
@@ -260,12 +254,12 @@ async fn handle_swarm_command(
     event_sender: &mpsc::UnboundedSender<P2PEvent>
 ) {
     match cmd {
-        SwarmCommand::SendMessage(content) => {
-            /*let topic = libp2p::gossipsub::IdentTopic::new("enclave-posts");
-
-            if let Ok(data) = serde_json::to_vec(&post) {
-                let _ = swarm.behaviour_mut().gossipsub.publish(topic, data);
-            }*/
+        SwarmCommand::SendPost(content) => {
+            CommandHandler::handle_send_post(
+                content,
+                swarm,
+                event_sender
+            ).await;
         },
         SwarmCommand::SendDirectMessage { peer, address, content } => {
             CommandHandler::handle_send_direct_message(
@@ -350,7 +344,29 @@ async fn handle_swarm_command(
             };
             
             let _ = sender.send(peer_direct_messages);
-        }
+        },
+        SwarmCommand::LoadFeed(sender) => {
+            let posts = match db::fetch_all_posts(db::DATABASE.clone()) {
+                Ok(p) => p,
+                Err(err) => {
+                    let _ = event_sender.send(P2PEvent::Error { context: "fetch_all_posts", error: err.to_string() });
+                    vec![]
+                }
+            };
+
+            let _ = sender.send(posts);
+        },
+        SwarmCommand::LoadBoard { sender, peer_id } => {
+            let posts = match db::fetch_posts_from_peer(db::DATABASE.clone(), peer_id.to_string()) {
+                Ok(p) => p,
+                Err(err) => {
+                    let _ = event_sender.send(P2PEvent::Error { context: "fetch_posts_from_peer", error: err.to_string() });
+                    vec![]
+                }
+            };
+
+            let _ = sender.send(posts);
+        },
         SwarmCommand::ConnectToRelay(address) => {
             log::info!("Connecting to relay: {}", address);
             let _ = swarm.dial(address.clone());
