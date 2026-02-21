@@ -7,6 +7,7 @@ use tokio::sync::oneshot::Sender;
 use crate::db::models::{direct_message::DirectMessage, post::Post};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FriendRequest {
     pub from_peer_id: String,
     pub from_multiaddr: String,
@@ -14,12 +15,14 @@ pub struct FriendRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FriendRequestResponse {
     pub accepted: bool,
     pub multiaddr: String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MyInfo {
     pub peer_id: String,
     pub keypair: Vec<u8>,
