@@ -4,6 +4,9 @@
 
     export let viewFriendBoard: (peerId: string) => void;
 
+    let clickTimers = new Map<string, NodeJS.Timeout>();
+    let inputElement: HTMLInputElement;
+
     function copyMyAddress() {
         if (!$myInfo) return;
         const text = `${$myInfo.multiaddr}/p2p/${$myInfo.peerId}`;
@@ -36,12 +39,42 @@
             }
         }
     }
+
+    function handleFriendClick(friend: string) {
+        if (clickTimers.has(friend)) {
+            clearTimeout(clickTimers.get(friend));
+            clickTimers.delete(friend);
+            return;
+        }
+
+        const timer = setTimeout(() => {
+            viewFriendBoard(friend);
+            clickTimers.delete(friend);
+        }, 300);
+
+        clickTimers.set(friend, timer);
+    }
+
+    function handleFriendDoubleClick(friend: string) {
+        if (clickTimers.has(friend)) {
+            clearTimeout(clickTimers.get(friend));
+            clickTimers.delete(friend);
+        }
+
+        editingPeer.set(friend);
+        draftNickname.set($nicknames.get(friend) ?? friend);
+
+        setTimeout(() => {
+            inputElement?.focus();
+            inputElement?.select();
+        }, 0);
+    }
 </script>
 
 <aside class="sidebar">
     <div class="my-info">
         <h3>My Info</h3>
-        <p class="peer-id">{$myInfo?.peerId.slice(0, 16)}...</p>
+        <p class="peer-id">{$myInfo?.peerId.slice(0, 24)}...</p>
         <button on:click={copyMyAddress} class="btn-secondary">Copy Connection Info</button>
         <button on:click={() => showRelaySettingsModal.set(true)} class="btn-secondary" style="margin-top: 8px;">Relay Settings</button>
     </div>
@@ -53,39 +86,47 @@
             <ul>
                 {#each $friendList as friend}
                     <li>
-                        <button
+                        <div
                             class="peer-item"
                             class:active={$openBoardPeerId === friend}
-                            aria-pressed={$openBoardPeerId === friend}
-                            on:click={() => viewFriendBoard(friend)}
+                            role="button"
+                            tabindex="0"
+                            on:click={() => handleFriendClick(friend)}
                             on:dblclick={(e) => {
                                 e.stopPropagation();
-                                editingPeer.set(friend);
-                                draftNickname.set($nicknames.get(friend) ?? friend);
+                                handleFriendDoubleClick(friend);
                             }}
                             on:contextmenu={(e) => showContextMenu(e, friend)}
+                            on:keydown={(e) => {
+                                if (e.key === 'Enter') {
+                                    handleFriendClick(friend);
+                                }
+                            }}
                         >
                             {#if $editingPeer === friend}
                                 <input
+                                    bind:this={inputElement}
                                     bind:value={$draftNickname}
+                                    on:focus={(e) => {console.log("Called"); e.currentTarget.select();}}
+                                    on:click|stopPropagation
                                     on:blur={() => {
                                         updateNickname($draftNickname.trim());
                                         editingPeer.set(null);
                                     }}
-                                    on:keydown={(e) => {
+                                    on:keydown|stopPropagation={(e) => {
                                         if (e.key === 'Enter') {
-                                        updateNickname($draftNickname.trim());
-                                        editingPeer.set(null);
+                                            updateNickname($draftNickname.trim());
+                                            editingPeer.set(null);
                                         }
                                         if (e.key === 'Escape') {
-                                        editingPeer.set(null);
+                                            editingPeer.set(null);
                                         }
                                     }}
                                 />
                             {:else}
                                 {displayName(friend, $nicknames, $myInfo?.peerId ?? '')}
                             {/if}
-                        </button>
+                        </div>
                     </li>
                 {/each}
             </ul>

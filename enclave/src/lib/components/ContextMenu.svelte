@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { contextMenuLocation, contextMenuPeer, contextMenuVisible, friendList, profilePeer } from "$lib/state";
+    import { contextMenuLocation, contextMenuPeer, contextMenuVisible, draftNickname, editingPeer, friendList, nicknames, profilePeer } from "$lib/state";
 
     function hideContextMenu() {
         contextMenuPeer.set(null);
@@ -32,10 +32,19 @@
         }
         hideContextMenu();
     }
+
+    function handleChangeNickname() {
+        if ($contextMenuPeer) {
+            editingPeer.set($contextMenuPeer);
+            draftNickname.set($nicknames.get($contextMenuPeer) ?? $contextMenuPeer);
+        }
+        hideContextMenu();
+    }
 </script>
 
 <div class="context-menu" style="top: {$contextMenuLocation[1]}px; left: {$contextMenuLocation[0]}px;" on:click|stopPropagation on:keydown={(e) => e.key === 'Escape' && hideContextMenu()} role="menu" tabindex="-1">
     <button class="context-menu-item" on:click={handleViewProfile}>View Profile</button>
+    <button class="context-menu-item" on:click={handleChangeNickname}>Change Nickname</button>
     <button class="context-menu-item" on:click={handleRemoveFriend}>Remove Friend</button>
     <button class="context-menu-item danger" on:click={handleBlockPeer}>Block</button>
 </div>

@@ -13,7 +13,8 @@
     on:keydown={(e) => e.key === 'Escape' && showProfileModal.set(false)} 
     role="presentation"
 >
-    <div class="modal" role="dialog" aria-labelledby="profile-modal-title" aria-modal="true" tabindex=0>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="profile-modal-title" aria-modal="true" tabindex=0>
         <h2 id="profile-modal-title">User Profile</h2>
         <div class="profile-section">
             <p>Peer ID</p>
