@@ -27,7 +27,8 @@
     on:keydown={(e) => e.key === 'Escape' && showRelaySettingsModal.set(false)}
     role="presentation"
 >
-    <div class="modal" role="dialog" aria-labelledby="relay-settings-modal-title" aria-modal="true" tabindex=0>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="relay-settings-modal-title" aria-modal="true" tabindex=0>
         <h2 id="relay-settings-modal-title">Relay Server Settings</h2>
         <p>Connect to a relay server to enable connections over the internet</p>
         <label>

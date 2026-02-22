@@ -40,7 +40,8 @@
     on:keydown={(e) => e.key === 'Escape' && showSendFriendRequestModal.set(false)}
     role="presentation"
 >
-    <div class="modal" role="dialog" aria-labelledby="friend-request-modal-title" aria-modal="true" tabindex=0>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="friend-request-modal-title" aria-modal="true" tabindex=0>
         <h2 id="friend-request-modal-title">Send Friend Request</h2>
         <p>Enter your friend's connection information</p>
         <label>
