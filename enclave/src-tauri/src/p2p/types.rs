@@ -8,6 +8,21 @@ use crate::db::models::{direct_message::DirectMessage, post::Post};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SynchRequest {
+    pub since: i64,
+    pub sender: String
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SynchResponse {
+    pub created_posts: Vec<Post>,
+    pub edited_posts: Vec<Post>,
+    pub sender: String
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FriendRequest {
     pub from_peer_id: String,
     pub from_multiaddr: String,
@@ -33,7 +48,9 @@ pub struct MyInfo {
 pub enum P2PMessage {
     FriendRequest(FriendRequest),
     FriendRequestResponse(FriendRequestResponse),
-    DirectMessage(DirectMessage)
+    DirectMessage(DirectMessage),
+    SynchRequest(SynchRequest),
+    SynchResponse(SynchResponse)
 }
 
 #[derive(Debug, Clone)]

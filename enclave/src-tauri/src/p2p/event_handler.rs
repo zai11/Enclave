@@ -1,3 +1,4 @@
+use libp2p::request_response::ResponseChannel;
 use libp2p::{PeerId};
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -5,7 +6,7 @@ use tokio::sync::mpsc;
 use crate::db;
 use crate::db::models::direct_message::DirectMessage;
 use crate::db::models::post::Post;
-use crate::p2p::types::*;
+use crate::p2p::{types::*};
 use crate::p2p::config::EnclaveNetworkBehaviour;
 
 pub struct EventHandler {
@@ -196,5 +197,48 @@ impl EventHandler {
         displayed_posts.push(post.clone());
 
         let _ = self.event_sender.send(P2PEvent::PostRecieved(post));
+    }
+
+    pub fn handle_synch_request(
+        &mut self, 
+        since: i64, 
+        sender: String,
+        swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>, 
+        channel: ResponseChannel<P2PMessage>
+    ) {
+        log::info!("Received synch request from '{}', since: {}", sender, since);
+        let posts = match db::fetch_all_posts(db::DATABASE.clone()) {
+            Ok(p) => p,
+            Err(err) => {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "fetch_all_posts", error: err.to_string() });
+                vec![]
+            }
+        };
+
+        let created_posts = posts.iter().filter(|&p| p.created_at >= since).cloned().collect::<Vec<Post>>();
+        let edited_posts = posts.iter().filter(|&p| p.edited_at >= Some(since)).cloned().collect::<Vec<Post>>();
+
+        let sender = swarm.local_peer_id().to_string();
+
+        let _ = swarm.behaviour_mut().request_response.send_response(
+            channel,
+            P2PMessage::SynchResponse(SynchResponse { created_posts, edited_posts, sender })
+        );
+    }
+
+    pub fn handle_synch_response(&self, created_posts: Vec<Post>, edited_posts: Vec<Post>, sender: String) {
+        log::info!("Received synch response from '{}'", sender);
+        log::info!("created_posts length: {}, edited_posts length: {}", created_posts.len(), edited_posts.len());
+        for post in created_posts {
+            if let Err(err) = db::create_post(db::DATABASE.clone(), post.author_peer_id, post.content) {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "create_post", error: err.to_string() });
+            }
+        }
+
+        for post in edited_posts {
+            if let Err(err) = db::update_post(db::DATABASE.clone(), post.id, post.content) {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "update_post", error: err.to_string() });
+            }
+        }
     }
 }

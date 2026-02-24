@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::str::FromStr;
 use tokio::sync::{mpsc, Mutex};
-use crate::db::{self, models::{direct_message::DirectMessage, post::Post}};
+use crate::{db::{self, models::{direct_message::DirectMessage, post::Post, user::User}}, p2p::types::{SynchRequest, SynchResponse}};
 
 use config::{NetworkConfig, create_swarm_behaviour};
 use event_handler::EventHandler;
@@ -76,6 +76,13 @@ impl P2PNode {
             }
         };
         listen_addresses.lock().await.push(first_address);
+        
+        if let Ok(identity_data) = db::fetch_identity(db::DATABASE.clone()) {
+            friend_synch(identity_data.last_login, &mut swarm, &event_sender);
+
+            let current_timestamp = chrono::Utc::now().timestamp();
+            db::update_identity(db::DATABASE.clone(), identity_data.id, Some(current_timestamp))?;
+        }
 
         spawn_event_loop(
             swarm,
@@ -117,7 +124,7 @@ async fn spawn_event_loop(
         let mut pending_friend_request_responses = HashMap::new();
         let mut outbound_direct_messages = HashMap::new();
 
-        let event_handler = EventHandler::new(event_sender.clone());
+        let mut event_handler = EventHandler::new(event_sender.clone());
 
         loop {
             tokio::select! {
@@ -130,7 +137,7 @@ async fn spawn_event_loop(
                         &mut displayed_posts,
                         &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
-                        &event_handler,
+                        &mut event_handler,
                         &mut swarm,
                         &listen_addresses,
                     )
@@ -165,7 +172,7 @@ async fn handle_swarm_event(
     displayed_posts: &mut Vec<Post>,
     outbound_requests: &mut HashMap<PeerId, FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
-    event_handler: &EventHandler,
+    event_handler: &mut EventHandler,
     swarm: &mut libp2p::Swarm<config::EnclaveNetworkBehaviour>,
     listen_addresses: &Arc<Mutex<Vec<Multiaddr>>>
 ) {
@@ -184,7 +191,7 @@ async fn handle_swarm_event(
             
             match req_event {
                 reqres::Event::Message { peer, message, .. } => {
-                    if let reqres::Message::Request { request, .. } = message {
+                    if let reqres::Message::Request { request, channel, .. } = message {
                         match request {
                             P2PMessage::FriendRequest(req) => {
                                 event_handler.handle_friend_request(peer, req);
@@ -194,6 +201,12 @@ async fn handle_swarm_event(
                             },
                             P2PMessage::DirectMessage(msg) => {
                                 event_handler.handle_direct_message(msg, friend_list, direct_messages);
+                            },
+                            P2PMessage::SynchRequest(SynchRequest{ since, sender }) => {
+                                event_handler.handle_synch_request(since, sender, swarm, channel);
+                            },
+                            P2PMessage::SynchResponse(SynchResponse{ created_posts, edited_posts, sender }) => {
+                                event_handler.handle_synch_response(created_posts, edited_posts, sender);
                             }
                         }
                     }
@@ -371,6 +384,56 @@ async fn handle_swarm_command(
             log::info!("Connecting to relay: {}", address);
             let _ = swarm.dial(address.clone());
             *relay_addr.lock().await = Some(address);
+        }
+    }
+}
+
+fn friend_synch(
+    last_login: i64, 
+    swarm: &mut libp2p::Swarm<config::EnclaveNetworkBehaviour>,
+    event_sender: &mpsc::UnboundedSender<P2PEvent>
+) {
+    let friends = match db::fetch_all_friends(db::DATABASE.clone()) {
+        Ok(f) => f,
+        Err(err) => {
+            let _ = event_sender.send(P2PEvent::Error { context: "fetch_all_friends", error: err.to_string() });
+            return;
+        }
+    }
+        .iter()
+        .filter_map(|friend| {
+            match db::fetch_user_by_id(db::DATABASE.clone(), friend.id) {
+                Ok(u) => Some(u),
+                Err(err) => {
+                    let _ = event_sender.send(P2PEvent::Error { context: "fetch_user_by_id", error: err.to_string() });
+                    None
+                }
+            }
+        })
+        .collect::<Vec<User>>();
+
+    log::info!("Synchronising posts from {} friends", friends.len());
+
+    let sender = swarm.local_peer_id().to_string();
+
+    for friend in friends {
+        match friend.peer_id.parse::<PeerId>() {
+            Ok(peer_id) => {
+                if !swarm.is_connected(&friend.peer_id) {
+                    log::info!("Not yet connected: Dialling first")
+                    swarm.dial(friend.multiaddr).await;
+                }
+                swarm.behaviour_mut().request_response.send_request(
+                    &peer_id,
+                    P2PMessage::SynchRequest(SynchRequest {
+                        since: last_login,
+                        sender: sender.clone()
+                    })
+                );
+            },
+            Err(err) => {
+                let _ = event_sender.send(P2PEvent::Error { context: "peer_id.parse", error: err.to_string() });
+            }
         }
     }
 }
