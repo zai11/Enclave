@@ -83,6 +83,9 @@ async fn start_p2p(state: tauri::State<'_, AppState>, app: tauri::AppHandle) -> 
                 },
                 P2PEvent::Error { context, error } => {
                     log::error!("{context}: {error}");
+                },
+                P2PEvent::PostSynch => {
+                    app.emit("load-feed", ()).ok();
                 }
             }
         }
