@@ -64,7 +64,8 @@ pub enum P2PEvent {
     FriendRequestReceived { from: PeerId, request: FriendRequest },
     FriendRequestAccepted { peer: PeerId },
     FriendRequestDenied { peer: PeerId },
-    Error { context: &'static str, error: String }
+    Error { context: &'static str, error: String },
+    PostSynch
 }
 
 pub(crate) enum SwarmCommand {

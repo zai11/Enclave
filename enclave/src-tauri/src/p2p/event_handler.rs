@@ -220,10 +220,12 @@ impl EventHandler {
 
         let sender = swarm.local_peer_id().to_string();
 
-        let _ = swarm.behaviour_mut().request_response.send_response(
+        if let Err(err) = swarm.behaviour_mut().request_response.send_response(
             channel,
             P2PMessage::SynchResponse(SynchResponse { created_posts, edited_posts, sender })
-        );
+        ) {
+            let _ = self.event_sender.send(P2PEvent::Error { context: "send_response", error: format!("{:?}", err) });
+        }
     }
 
     pub fn handle_synch_response(&self, created_posts: Vec<Post>, edited_posts: Vec<Post>, sender: String) {
@@ -240,5 +242,7 @@ impl EventHandler {
                 let _ = self.event_sender.send(P2PEvent::Error { context: "update_post", error: err.to_string() });
             }
         }
+
+        let _ = self.event_sender.send(P2PEvent::PostSynch);
     }
 }

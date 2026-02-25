@@ -205,9 +205,14 @@ async fn handle_swarm_event(
                             P2PMessage::SynchRequest(SynchRequest{ since, sender }) => {
                                 event_handler.handle_synch_request(since, sender, swarm, channel);
                             },
+                            _ => {}
+                        }
+                    } else if let reqres::Message::Response { response, .. } = message {
+                        match response {
                             P2PMessage::SynchResponse(SynchResponse{ created_posts, edited_posts, sender }) => {
                                 event_handler.handle_synch_response(created_posts, edited_posts, sender);
-                            }
+                            },
+                            _ => {}
                         }
                     }
                 },
@@ -402,7 +407,7 @@ fn friend_synch(
     }
         .iter()
         .filter_map(|friend| {
-            match db::fetch_user_by_id(db::DATABASE.clone(), friend.id) {
+            match db::fetch_user_by_id(db::DATABASE.clone(), friend.user_id) {
                 Ok(u) => Some(u),
                 Err(err) => {
                     let _ = event_sender.send(P2PEvent::Error { context: "fetch_user_by_id", error: err.to_string() });
@@ -417,24 +422,37 @@ fn friend_synch(
     let sender = swarm.local_peer_id().to_string();
 
     for friend in friends {
-        match friend.peer_id.parse::<PeerId>() {
-            Ok(peer_id) => {
-                if !swarm.is_connected(&friend.peer_id) {
-                    log::info!("Not yet connected: Dialling first")
-                    swarm.dial(friend.multiaddr).await;
-                }
-                swarm.behaviour_mut().request_response.send_request(
-                    &peer_id,
-                    P2PMessage::SynchRequest(SynchRequest {
-                        since: last_login,
-                        sender: sender.clone()
-                    })
-                );
-            },
+        let peer_id = match friend.peer_id.parse::<PeerId>() {
+            Ok(p) => p,
             Err(err) => {
                 let _ = event_sender.send(P2PEvent::Error { context: "peer_id.parse", error: err.to_string() });
+                return;
+            }
+        };
+
+        let multiaddr = match Multiaddr::from_str(format!("{}/p2p/{}", friend.multiaddr, friend.peer_id).as_str()) {
+            Ok(m) => m,
+            Err(err) => {
+                let _ = event_sender.send(P2PEvent::Error { context: "Multiaddr::from_str", error: err.to_string() });
+                return;
+            }
+        };
+
+        if !swarm.is_connected(&peer_id) {
+            log::info!("Not yet connected: Dialling first");
+            if let Err(err) = swarm.dial(multiaddr) {
+                let _ = event_sender.send(P2PEvent::Error { context: "swarm.dial", error: err.to_string() });
+                return;
             }
         }
+
+        swarm.behaviour_mut().request_response.send_request(
+            &peer_id,
+            P2PMessage::SynchRequest(SynchRequest {
+                since: last_login,
+                sender: sender.clone()
+            })
+        );
     }
 }
 
