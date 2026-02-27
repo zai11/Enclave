@@ -122,7 +122,6 @@ async fn spawn_event_loop(
         let mut displayed_posts = Vec::new();
         let mut outbound_friend_requests = HashMap::new();
         let mut pending_friend_request_responses = HashMap::new();
-        let mut outbound_direct_messages = HashMap::new();
 
         let mut event_handler = EventHandler::new(event_sender.clone());
 
@@ -133,7 +132,6 @@ async fn spawn_event_loop(
                         event,
                         &mut friend_list,
                         &mut direct_messages,
-                        &mut outbound_direct_messages,
                         &mut displayed_posts,
                         &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
@@ -151,7 +149,6 @@ async fn spawn_event_loop(
                         &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
                         &mut direct_messages,
-                        &mut outbound_direct_messages,
                         &mut swarm,
                         &listen_addresses,
                         &relay_addr,
@@ -168,7 +165,6 @@ async fn handle_swarm_event(
     event: SwarmEvent<config::EnclaveNetworkBehaviourEvent>,
     friend_list: &mut Vec<PeerId>,
     direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
-    outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
     displayed_posts: &mut Vec<Post>,
     outbound_requests: &mut HashMap<PeerId, FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
@@ -245,7 +241,6 @@ async fn handle_swarm_event(
                     &endpoint,
                     outbound_requests,
                     pending_responses,
-                    outbound_direct_messages,
                     swarm
                 )
                 .await;
@@ -265,7 +260,6 @@ async fn handle_swarm_command(
     outbound_requests: &mut HashMap<PeerId, FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
     direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
-    outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
     swarm: &mut libp2p::Swarm<config::EnclaveNetworkBehaviour>,
     listen_addresses: &Arc<Mutex<Vec<Multiaddr>>>,
     relay_addr: &Arc<Mutex<Option<Multiaddr>>>,
@@ -285,7 +279,6 @@ async fn handle_swarm_command(
                 address, 
                 content, 
                 friend_list, 
-                outbound_direct_messages, 
                 swarm,
                 event_sender
             )

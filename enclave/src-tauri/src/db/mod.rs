@@ -76,7 +76,8 @@ pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
                             content TEXT NOT NULL,
                             created_at INTEGER NOT NULL,
                             edited_at INTEGER,
-                            read BOOLEAN DEFAULT 0
+                            read BOOLEAN DEFAULT 0,
+                            pending BOOLEAN DEFAULT 1
                         );", ())?;
         log::info!("Created direct messages table.");
     }
@@ -534,14 +535,14 @@ pub fn fetch_direct_message_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read FROM tbl_direct_messages WHERE id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending FROM tbl_direct_messages WHERE id=?1;")?;
 
     if !query.exists(rusqlite::params![id])? {
         return Err(anyhow::anyhow!("A direct message with id {id} was not found."));
     }
 
-    let (id, from_peer_id, to_peer_id, content, created_at, edited_at, read): (i64, String, String, String, i64, Option<i64>, bool) = query.query_row(rusqlite::params![id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+    let (id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending): (i64, String, String, String, i64, Option<i64>, bool, bool) = query.query_row(rusqlite::params![id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
     })?;
 
     Ok(
@@ -552,7 +553,8 @@ pub fn fetch_direct_message_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow
             content, 
             created_at, 
             edited_at,
-            read 
+            read,
+            pending
         )
     )
 }
@@ -561,7 +563,7 @@ pub fn fetch_direct_messages_with_peer(db: Arc<Mutex<Connection>>, peer_id: Stri
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read FROM tbl_direct_messages WHERE from_peer_id=?1 OR to_peer_id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending FROM tbl_direct_messages WHERE from_peer_id=?1 OR to_peer_id=?1;")?;
 
     if !query.exists(rusqlite::params![peer_id])? {
         return Err(anyhow::anyhow!("A direct message with user_id {peer_id} was not found."));
@@ -575,7 +577,8 @@ pub fn fetch_direct_messages_with_peer(db: Arc<Mutex<Connection>>, peer_id: Stri
             row.get(3)?, 
             row.get(4)?, 
             row.get(5)?, 
-            row.get(6)?
+            row.get(6)?,
+            row.get(7)?
         ))
     })?;
 
@@ -589,7 +592,8 @@ pub fn fetch_direct_messages_with_peer(db: Arc<Mutex<Connection>>, peer_id: Stri
             row.3, 
             row.4, 
             row.5, 
-            row.6
+            row.6,
+            row.7
         ))
     }).collect::<anyhow::Result<Vec<DirectMessage>>>()
 }
@@ -598,7 +602,7 @@ pub fn fetch_all_direct_messages(db: Arc<Mutex<Connection>>) -> anyhow::Result<V
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read FROM tbl_direct_messages;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending FROM tbl_direct_messages;")?;
 
     if !query.exists(())? {
         return Err(anyhow::anyhow!("No direct message data was found."));
@@ -613,6 +617,7 @@ pub fn fetch_all_direct_messages(db: Arc<Mutex<Connection>>) -> anyhow::Result<V
             row.get(4)?,
             row.get(5)?,
             row.get(6)?,
+            row.get(7)?
         ))
     })?;
 
@@ -627,7 +632,8 @@ pub fn fetch_all_direct_messages(db: Arc<Mutex<Connection>>) -> anyhow::Result<V
                 row.3,
                 row.4,
                 row.5,
-                row.6
+                row.6,
+                 row.7
             )
         )
     }).collect::<anyhow::Result<Vec<DirectMessage>>>()
@@ -647,16 +653,25 @@ pub fn create_direct_message(db: Arc<Mutex<Connection>>, from_peer_id: String, t
     Ok(db_guard.last_insert_rowid())
 }
 
-pub fn update_direct_message(db: Arc<Mutex<Connection>>, id: i64, content: String) -> anyhow::Result<()> {
+pub fn update_direct_message(db: Arc<Mutex<Connection>>, id: i64, content: Option<String>, pending: Option<bool>) -> anyhow::Result<()> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
     let edited_at = chrono::Utc::now().timestamp();
 
-    db_guard.execute(
-        "UPDATE tbl_direct_messages SET content=?1, edited_at=?2 WHERE id=?3;", 
-        rusqlite::params![content, edited_at, id]
-    )?;
+    if let Some(content) = content {
+        db_guard.execute(
+            "UPDATE tbl_direct_messages SET content=?1, edited_at=?2 WHERE id=?3;", 
+            rusqlite::params![content, edited_at, id]
+        )?;
+    }
+
+    if let Some(pending) = pending {
+        db_guard.execute(
+            "UPDATE tbl_direct_messages SET pending=?1, edited_at=?2 WHERE id=?3;", 
+            rusqlite::params![pending, edited_at, id]
+        )?;
+    }
     
     Ok(())
 }
@@ -1755,23 +1770,25 @@ pub mod test {
         create_direct_message(db.clone(), peer_id_1.clone(), peer_id_2.clone(), "Hello DM".to_string())
             .expect("create_direct_message failed");
 
-        let (dm_id, dm_from_peer_id, dm_to_peer_id, dm_content): (i64, String, String, String) = {
+        let (dm_id, dm_from_peer_id, dm_to_peer_id, dm_content, dm_read, dm_pending): (i64, String, String, String, bool, bool) = {
             let conn = db.lock().unwrap();
             conn.query_row(
-                "SELECT id, from_peer_id, to_peer_id, content FROM tbl_direct_messages LIMIT 1;",
+                "SELECT id, from_peer_id, to_peer_id, content, read, pending FROM tbl_direct_messages LIMIT 1;",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
             ).unwrap()
         };
 
         assert_eq!(dm_from_peer_id, peer_id_1);
         assert_eq!(dm_to_peer_id, peer_id_2);
         assert_eq!(dm_content, "Hello DM");
+        assert_eq!(dm_read, false);
+        assert_eq!(dm_pending, true);
         assert!(dm_id > 0);
     }
 
     #[test]
-    pub fn test_update_direct_message_correctly_updates_direct_message_data() {
+    pub fn test_update_direct_message_correctly_updates_direct_message_content() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
@@ -1784,7 +1801,7 @@ pub mod test {
 
         let dm_id = create_direct_message(db.clone(), peer_id_1, peer_id_2, "Original Content".to_string()).unwrap();
 
-        update_direct_message(db.clone(), dm_id, "Updated Content".to_string()).unwrap();
+        update_direct_message(db.clone(), dm_id, Some("Updated Content".to_string()), None).unwrap();
 
         let updated_content: String = {
             let conn = db.lock().unwrap();
@@ -1796,6 +1813,34 @@ pub mod test {
         };
 
         assert_eq!(updated_content, "Updated Content");
+    }
+
+    #[test]
+    pub fn test_update_direct_message_correctly_updates_direct_message_pending() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+
+        create_user(db.clone(), peer_id_1.clone(), multiaddr_1.clone(), false).unwrap();
+        create_user(db.clone(), peer_id_2.clone(), multiaddr_2.clone(), false).unwrap();
+
+        let dm_id = create_direct_message(db.clone(), peer_id_1, peer_id_2, "Test Content".to_string()).unwrap();
+
+        update_direct_message(db.clone(), dm_id, None, Some(false)).unwrap();
+
+        let updated_pending: bool = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT pending FROM tbl_direct_messages WHERE id=?1;",
+                [dm_id],
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        assert_eq!(updated_pending, false);
     }
 
     #[test]

@@ -24,7 +24,6 @@ impl EventHandler {
         endpoint: &libp2p_core::connection::ConnectedPoint,
         outbound_requests: &mut HashMap<PeerId, FriendRequest>,
         pending_responses: &mut HashMap<PeerId, P2PMessage>,
-        outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
         swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>
     ) {
         log::info!("Connected to peer: {peer_id}");
@@ -56,14 +55,28 @@ impl EventHandler {
                 .send_request(&peer_id, response);
         }
 
-        if let Some(dms) = outbound_direct_messages.remove(&peer_id) {
-            log::info!("Sending {} buffered direct messages to {}", dms.len(), peer_id);
-            dms.iter().for_each(|dm| {
-                swarm.behaviour_mut()
-                    .request_response
-                    .send_request(&peer_id, P2PMessage::DirectMessage(dm.to_owned()));
-            });
+        let outbound_direct_messages = match db::fetch_direct_messages_with_peer(db::DATABASE.clone(), peer_id.to_string()) {
+            Ok(dms) => dms,
+            Err(err) => {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "fetch_direct_messages_with_peer", error: err.to_string() });
+                return;
+            }
         }
+            .iter()
+            .filter(|&dm| dm.pending)
+            .cloned()
+            .collect::<Vec<DirectMessage>>();
+
+        outbound_direct_messages.iter().for_each(|dm| {
+            swarm.behaviour_mut()
+                .request_response
+                .send_request(&peer_id, P2PMessage::DirectMessage(dm.to_owned()));
+
+            if let Err(err) = db::update_direct_message(db::DATABASE.clone(), dm.id, None, Some(false)) {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "update_direct_message", error: err.to_string() });
+                return;
+            }
+        });
     }
 
     pub fn handle_friend_request(

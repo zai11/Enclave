@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::db;
-use crate::db::models::direct_message::DirectMessage;
 use crate::p2p::types::*;
 use crate::p2p::config::EnclaveNetworkBehaviour;
 
@@ -132,7 +131,6 @@ impl CommandHandler {
         address: Multiaddr,
         content: String,
         friend_list: &mut Vec<PeerId>,
-        outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
         swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>,
         event_sender: &tokio::sync::mpsc::UnboundedSender<P2PEvent>
     ) {
@@ -162,26 +160,18 @@ impl CommandHandler {
         if swarm.is_connected(&peer_id) {
             log::info!("Already connected, sending direct message immediately");
             swarm.behaviour_mut().request_response.send_request(&peer_id, P2PMessage::DirectMessage(message));
+            if let Err(err) = db::update_direct_message(db::DATABASE.clone(), direct_message_id, None, Some(false)) {
+                let _ = event_sender.send(P2PEvent::Error { context: "update_direct_message", error: err.to_string() });
+                return;
+            }
         } else {
             log::info!("Not connected, dialing before sending acceptance");
 
-            match outbound_direct_messages.get_mut(&peer_id) {
-                Some(dms) => dms.push(message),
-                None => {
-                    outbound_direct_messages.insert(peer_id, vec![message]);
-                }
-            };
             if let Err(err) = swarm.dial(address) {
                 let _ = event_sender.send(P2PEvent::Error {
                     context: "swarm.dial",
                     error: err.to_string()
                 });
-                match outbound_direct_messages.get_mut(&peer_id) {
-                    Some(dms) => {
-                        dms.pop();
-                    },
-                    None => ()
-                }
             }
         }
     }
