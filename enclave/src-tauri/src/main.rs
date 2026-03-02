@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use std::{str::FromStr, sync::Arc};
 use libp2p::{PeerId, Multiaddr};
 
-use crate::{db::models::{direct_message::DirectMessage, post::Post}, logger::Logger, p2p::{FriendRequest, MyInfo}};
+use crate::{db::models::{direct_message::DirectMessage, friend_request::FriendRequest, post::Post}, logger::Logger, p2p::MyInfo};
 
 static LOGGER: once_cell::sync::Lazy<Logger> =
     once_cell::sync::Lazy::new(|| {
@@ -327,7 +327,7 @@ async fn get_friend_list(state: tauri::State<'_, AppState>) -> Result<Vec<String
 }
 
 #[tauri::command]
-async fn get_inbound_friend_requests(state: tauri::State<'_, AppState>) -> Result<Vec<(String, FriendRequest)>, String> {
+async fn get_inbound_friend_requests(state: tauri::State<'_, AppState>) -> Result<Vec<FriendRequest>, String> {
     let node_guard = state.p2p_node.lock().await;
 
     let node = match node_guard.as_ref() {
@@ -344,10 +344,7 @@ async fn get_inbound_friend_requests(state: tauri::State<'_, AppState>) -> Resul
             log::error!("{}", err.to_string());
             return Err(err.to_string());
         }
-    }
-        .iter()
-        .map(|(peer_id, friend_request)| (peer_id.to_string(), friend_request.clone()))
-        .collect::<Vec<(String, FriendRequest)>>();
+    };
 
     Ok(friend_requests)
 }

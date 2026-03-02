@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::db;
-use crate::p2p::types::*;
+use crate::p2p::{types::*};
 use crate::p2p::config::EnclaveNetworkBehaviour;
 
 pub struct CommandHandler;
@@ -13,33 +13,28 @@ impl CommandHandler {
         peer: PeerId,
         address: Multiaddr,
         message: String,
-        outbound_requests: &mut HashMap<PeerId, FriendRequest>,
         listen_addrs: &Arc<Mutex<Vec<Multiaddr>>>,
         relay_addr: &Arc<Mutex<Option<Multiaddr>>>,
-        swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>
+        swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>,
+        event_sender: &tokio::sync::mpsc::UnboundedSender<P2PEvent>
     ) {
         log::info!("Buffering friend request to: {peer} at: {address}");
 
         let local_addresses = listen_addrs.lock().await;
         let relay_addr_opt = relay_addr.lock().await;
 
-        let address_to_send = if let Some(relay) = relay_addr_opt.as_ref() {
+        let from_multiaddr = if let Some(relay) = relay_addr_opt.as_ref() {
             format!("{}/p2p-circuit/p2p/{}", relay, swarm.local_peer_id())
         } else {
             local_addresses.first().map(|a| a.to_string()).unwrap_or_default()
         };
 
-        let request = FriendRequest {
-            from_peer_id: swarm.local_peer_id().to_string(),
-            from_multiaddr: address_to_send,
-            message
+        if let Err(err) = db::create_friend_request(db::DATABASE.clone(), swarm.local_peer_id().to_string(), from_multiaddr, peer.to_string(), address.to_string(), message) {
+            let _ = event_sender.send(P2PEvent::Error { context: "create_friend_request", error: err.to_string() });
         };
 
-        outbound_requests.insert(peer, request);
-
         if let Err(err) = swarm.dial(address) {
-            log::error!("Failed to dial peer {}: {}", peer, err);
-            outbound_requests.remove(&peer);
+            let _ = event_sender.send(P2PEvent::Error { context: "swarm.dial", error: format!("Failed to dial peer {}: {}", peer, err.to_string()) });
         }
     }
 
@@ -74,8 +69,12 @@ impl CommandHandler {
                 return;
             }
 
-            if let Ok(friend_request) = db::fetch_friend_request_by_from_user_id(db::DATABASE.clone(), user.id) {
-                let _ = db::delete_friend_request(db::DATABASE.clone(), friend_request.id);
+            if let Ok(friend_requests) = db::fetch_friend_requests_to_peer(db::DATABASE.clone(), user.peer_id) {
+                if friend_requests.len() > 0 { 
+                    if let Err(err) = db::delete_friend_request(db::DATABASE.clone(), friend_requests[0].id) {
+                        let _ = event_sender.send(P2PEvent::Error { context: "delete_friend_request", error: err.to_string() });
+                    }
+                }
             }
 
             friend_list.push(peer);
@@ -124,6 +123,38 @@ impl CommandHandler {
                 }
             }
         }
+    }
+
+    pub async fn handle_deny_friend_request(
+        peer: PeerId,
+        swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>,
+        event_sender: &tokio::sync::mpsc::UnboundedSender<P2PEvent>
+    ) {
+        let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
+            Ok(u) => u,
+            Err(err) => {
+                let _ = event_sender.send(P2PEvent::Error {
+                    context: "fetch_user_by_peer_id",
+                    error: err.to_string(),
+                });
+                return;
+            }
+        };
+
+        if let Ok(friend_requests) = db::fetch_friend_requests_to_peer(db::DATABASE.clone(), user.peer_id) {
+            if friend_requests.len() > 0 { 
+                if let Err(err) = db::delete_friend_request(db::DATABASE.clone(), friend_requests[0].id) {
+                    let _ = event_sender.send(P2PEvent::Error { context: "delete_friend_request", error: err.to_string() });
+                }
+            }
+        }
+
+        let response = P2PMessage::FriendRequestResponse(FriendRequestResponse {
+            accepted: false,
+            multiaddr: String::new()
+        });
+
+        swarm.behaviour_mut().request_response.send_request(&peer, response);
     }
 
     pub async fn handle_send_direct_message(

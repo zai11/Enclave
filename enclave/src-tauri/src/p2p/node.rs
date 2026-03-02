@@ -1,8 +1,7 @@
 use libp2p::{Multiaddr, PeerId, identity::Keypair};
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::sync::{mpsc, Mutex};
-use crate::{db::models::{direct_message::DirectMessage, post::Post}, p2p::types::*};
+use crate::{db::models::{direct_message::DirectMessage, friend_request::FriendRequest, post::Post}, p2p::types::*};
 
 pub struct P2PNode {
     pub peer_id: PeerId,
@@ -67,7 +66,7 @@ impl P2PNode {
         Ok(receiver.await?)
     }
 
-    pub async fn get_inbound_friend_requests(&self) -> anyhow::Result<HashMap<PeerId, FriendRequest>> {
+    pub async fn get_inbound_friend_requests(&self) -> anyhow::Result<Vec<FriendRequest>> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         self.swarm_sender.send(SwarmCommand::GetInboundFriendRequests(sender))?;
         Ok(receiver.await?)
