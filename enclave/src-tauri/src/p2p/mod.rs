@@ -9,14 +9,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::str::FromStr;
 use tokio::sync::{mpsc, Mutex};
-use crate::{db::{self, models::{direct_message::DirectMessage, post::Post, user::User}}, p2p::types::{SynchRequest, SynchResponse}};
+use crate::{db::{self, models::{direct_message::DirectMessage, friend_request::FriendRequest, post::Post, user::User}}, p2p::types::{SynchRequest, SynchResponse}};
 
 use config::{NetworkConfig, create_swarm_behaviour};
 use event_handler::EventHandler;
 use command_handler::CommandHandler;
 use types::{SwarmCommand};
 
-pub use types::{FriendRequest, FriendRequestResponse, P2PMessage, P2PEvent, MyInfo};
+pub use types::{P2PMessage, P2PEvent, MyInfo};
 pub use node::P2PNode;
 
 impl P2PNode {
@@ -117,12 +117,13 @@ async fn spawn_event_loop(
 ) {
     tokio::spawn(async move {
         let mut friend_list = load_friend_list(&event_sender);
-        let inbound_friend_requests = load_inbound_requests(&event_sender);
+        let inbound_friend_requests = match db::fetch_friend_requests_to_peer(db::DATABASE.clone(), swarm.local_peer_id().to_string()) {
+            Ok(r) => r,
+            Err(_) => vec![]
+        };
         let mut direct_messages = HashMap::new();
         let mut displayed_posts = Vec::new();
-        let mut outbound_friend_requests = HashMap::new();
         let mut pending_friend_request_responses = HashMap::new();
-        let mut outbound_direct_messages = HashMap::new();
 
         let mut event_handler = EventHandler::new(event_sender.clone());
 
@@ -133,9 +134,7 @@ async fn spawn_event_loop(
                         event,
                         &mut friend_list,
                         &mut direct_messages,
-                        &mut outbound_direct_messages,
                         &mut displayed_posts,
-                        &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
                         &mut event_handler,
                         &mut swarm,
@@ -148,10 +147,8 @@ async fn spawn_event_loop(
                         cmd,
                         &mut friend_list,
                         &inbound_friend_requests,
-                        &mut outbound_friend_requests,
                         &mut pending_friend_request_responses,
                         &mut direct_messages,
-                        &mut outbound_direct_messages,
                         &mut swarm,
                         &listen_addresses,
                         &relay_addr,
@@ -168,9 +165,7 @@ async fn handle_swarm_event(
     event: SwarmEvent<config::EnclaveNetworkBehaviourEvent>,
     friend_list: &mut Vec<PeerId>,
     direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
-    outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
     displayed_posts: &mut Vec<Post>,
-    outbound_requests: &mut HashMap<PeerId, FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
     event_handler: &mut EventHandler,
     swarm: &mut libp2p::Swarm<config::EnclaveNetworkBehaviour>,
@@ -194,7 +189,7 @@ async fn handle_swarm_event(
                     if let reqres::Message::Request { request, channel, .. } = message {
                         match request {
                             P2PMessage::FriendRequest(req) => {
-                                event_handler.handle_friend_request(peer, req);
+                                event_handler.handle_friend_request(peer, req, swarm);
                             },
                             P2PMessage::FriendRequestResponse(response) => {
                                 event_handler.handle_friend_request_response(peer, response, friend_list, swarm);
@@ -243,9 +238,7 @@ async fn handle_swarm_event(
                 .handle_connection_established(
                     peer_id,
                     &endpoint,
-                    outbound_requests,
                     pending_responses,
-                    outbound_direct_messages,
                     swarm
                 )
                 .await;
@@ -261,11 +254,9 @@ async fn handle_swarm_event(
 async fn handle_swarm_command(
     cmd: SwarmCommand,
     friend_list: &mut Vec<PeerId>,
-    inbound_requests: &HashMap<PeerId, FriendRequest>,
-    outbound_requests: &mut HashMap<PeerId, FriendRequest>,
+    inbound_friend_requests: &Vec<FriendRequest>,
     pending_responses: &mut HashMap<PeerId, P2PMessage>,
     direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
-    outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
     swarm: &mut libp2p::Swarm<config::EnclaveNetworkBehaviour>,
     listen_addresses: &Arc<Mutex<Vec<Multiaddr>>>,
     relay_addr: &Arc<Mutex<Option<Multiaddr>>>,
@@ -285,7 +276,6 @@ async fn handle_swarm_command(
                 address, 
                 content, 
                 friend_list, 
-                outbound_direct_messages, 
                 swarm,
                 event_sender
             )
@@ -296,10 +286,10 @@ async fn handle_swarm_command(
                 peer,
                 address,
                 message,
-                outbound_requests,
                 listen_addresses,
                 relay_addr,
-                swarm
+                swarm,
+                event_sender
             )
             .await;
         },
@@ -316,33 +306,18 @@ async fn handle_swarm_command(
             .await;
         },
         SwarmCommand::DenyFriendRequest(peer) => {
-            let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
-                Ok(u) => u,
-                Err(err) => {
-                    let _ = event_sender.send(P2PEvent::Error {
-                        context: "fetch_user_by_peer_id",
-                        error: err.to_string(),
-                    });
-                    return;
-                }
-            };
-
-            if let Ok(friend_request) = db::fetch_friend_request_by_from_user_id(db::DATABASE.clone(), user.id) {
-                let _ = db::delete_friend_request(db::DATABASE.clone(), friend_request.id);
-            }
-
-            let response = P2PMessage::FriendRequestResponse(FriendRequestResponse {
-                accepted: false,
-                multiaddr: String::new()
-            });
-
-            swarm.behaviour_mut().request_response.send_request(&peer, response);
+            CommandHandler::handle_deny_friend_request(
+                peer,
+                swarm,
+                event_sender
+            )
+            .await;
         },
         SwarmCommand::GetFriendList(sender) => {
             let _ = sender.send(friend_list.clone());
         },
         SwarmCommand::GetInboundFriendRequests(sender) => {
-            let _ = sender.send(inbound_requests.clone());
+            let _ = sender.send(inbound_friend_requests.clone());
         },
         SwarmCommand::GetDirectMessages { sender, peer_id } => {
             let direct_messages_with_peer = match db::fetch_direct_messages_with_peer(db::DATABASE.clone(), peer_id.to_string()) {
@@ -470,37 +445,6 @@ fn load_friend_list(event_sender: &mpsc::UnboundedSender<P2PEvent>) -> Vec<PeerI
             db::fetch_user_by_id(db::DATABASE.clone(), friend.user_id)
                 .ok()
                 .and_then(|user| PeerId::from_str(&user.peer_id).ok())
-        })
-        .collect()
-}
-
-fn load_inbound_requests(event_sender: &mpsc::UnboundedSender<P2PEvent>) -> HashMap<PeerId, FriendRequest> {
-    db::fetch_all_friend_requests(db::DATABASE.clone())
-        .unwrap_or_else(|err| {
-            let _ = event_sender.send(P2PEvent::Error {
-                context: "fetch_all_friend_requests",
-                error: err.to_string()
-            });
-            Vec::new()
-        })
-        .into_iter()
-        .filter_map(|req| {
-            db::fetch_user_by_id(db::DATABASE.clone(), req.from_user_id)
-                .ok()
-                .and_then(|user| {
-                    PeerId::from_str(&user.peer_id)
-                        .ok()
-                        .map(|peer_id| {
-                            (
-                                peer_id,
-                                FriendRequest {
-                                    from_peer_id: user.peer_id,
-                                    from_multiaddr: user.multiaddr,
-                                    message: req.message
-                                }
-                            )
-                        })
-                })
         })
         .collect()
 }

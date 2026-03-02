@@ -5,6 +5,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc;
 use crate::db;
 use crate::db::models::direct_message::DirectMessage;
+use crate::db::models::friend_request::FriendRequest;
 use crate::db::models::post::Post;
 use crate::p2p::{types::*};
 use crate::p2p::config::EnclaveNetworkBehaviour;
@@ -22,9 +23,7 @@ impl EventHandler {
         &self,
         peer_id: PeerId,
         endpoint: &libp2p_core::connection::ConnectedPoint,
-        outbound_requests: &mut HashMap<PeerId, FriendRequest>,
         pending_responses: &mut HashMap<PeerId, P2PMessage>,
-        outbound_direct_messages: &mut HashMap<PeerId, Vec<DirectMessage>>,
         swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>
     ) {
         log::info!("Connected to peer: {peer_id}");
@@ -42,11 +41,17 @@ impl EventHandler {
             });
         }
 
-        if let Some(request) = outbound_requests.remove(&peer_id) {
-            log::info!("Sending buffered friend request to {}", peer_id);
-            swarm.behaviour_mut()
-                .request_response
-                .send_request(&peer_id, P2PMessage::FriendRequest(request));
+        if let Ok(pending_friend_requests) = db::fetch_friend_requests_to_peer(db::DATABASE.clone(), peer_id.to_string()) {
+            if pending_friend_requests.len() > 0 {
+                swarm.behaviour_mut()
+                    .request_response
+                    .send_request(&peer_id, P2PMessage::FriendRequest(pending_friend_requests[0].to_owned()));
+
+                if let Err(err) = db::update_friend_request(db::DATABASE.clone(), pending_friend_requests[0].id, Some(false)) {
+                    let _ = self.event_sender.send(P2PEvent::Error { context: "update_direct_message", error: err.to_string() });
+                    return;
+                }
+            }
         }
 
         if let Some(response) = pending_responses.remove(&peer_id) {
@@ -56,20 +61,35 @@ impl EventHandler {
                 .send_request(&peer_id, response);
         }
 
-        if let Some(dms) = outbound_direct_messages.remove(&peer_id) {
-            log::info!("Sending {} buffered direct messages to {}", dms.len(), peer_id);
-            dms.iter().for_each(|dm| {
-                swarm.behaviour_mut()
-                    .request_response
-                    .send_request(&peer_id, P2PMessage::DirectMessage(dm.to_owned()));
-            });
+        let outbound_direct_messages = match db::fetch_direct_messages_with_peer(db::DATABASE.clone(), peer_id.to_string()) {
+            Ok(dms) => dms,
+            Err(err) => {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "fetch_direct_messages_with_peer", error: err.to_string() });
+                return;
+            }
         }
+            .iter()
+            .filter(|&dm| dm.pending)
+            .cloned()
+            .collect::<Vec<DirectMessage>>();
+
+        outbound_direct_messages.iter().for_each(|dm| {
+            swarm.behaviour_mut()
+                .request_response
+                .send_request(&peer_id, P2PMessage::DirectMessage(dm.to_owned()));
+
+            if let Err(err) = db::update_direct_message(db::DATABASE.clone(), dm.id, None, Some(false)) {
+                let _ = self.event_sender.send(P2PEvent::Error { context: "update_direct_message", error: err.to_string() });
+                return;
+            }
+        });
     }
 
     pub fn handle_friend_request(
         &self,
         peer: PeerId,
-        request: FriendRequest
+        request: FriendRequest,
+        swarm: &mut libp2p::Swarm<EnclaveNetworkBehaviour>
     ) {
         log::info!("Received friend request from {}: {}", peer, request.message);
         
@@ -78,18 +98,7 @@ impl EventHandler {
             request: request.clone()
         });
 
-        let user = match db::fetch_user_by_peer_id(db::DATABASE.clone(), peer.to_string()) {
-            Ok(u) => u,
-            Err(err) => {
-                let _ = self.event_sender.send(P2PEvent::Error {
-                    context: "fetch_user_by_peer_id",
-                    error: err.to_string()
-                });
-                return;
-            }
-        };
-
-        if let Err(err) = db::create_friend_request(db::DATABASE.clone(), user.id, request.message) {
+        if let Err(err) = db::create_friend_request(db::DATABASE.clone(), request.from_peer_id, request.from_multiaddr, swarm.local_peer_id().to_string(), request.to_multiaddr, request.message) {
             let _ = self.event_sender.send(P2PEvent::Error {
                 context: "create_friend_request",
                 error: err.to_string()

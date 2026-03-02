@@ -9,11 +9,12 @@ pub struct DirectMessage {
     pub content: String,
     pub created_at: i64,
     pub edited_at: Option<i64>,
-    pub read: bool
+    pub read: bool,
+    pub pending: bool
 }
 
 impl DirectMessage {
-    pub fn new(id: i64, from_peer_id: String, to_peer_id: String, content: String, created_at: i64, edited_at: Option<i64>, read: bool) -> Self {
+    pub fn new(id: i64, from_peer_id: String, to_peer_id: String, content: String, created_at: i64, edited_at: Option<i64>, read: bool, pending: bool) -> Self {
         Self {
             id,
             from_peer_id,
@@ -21,7 +22,8 @@ impl DirectMessage {
             content,
             created_at,
             edited_at,
-            read
+            read,
+            pending
         }
     }
 }

@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use libp2p::PeerId;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot::Sender;
 
-use crate::db::models::{direct_message::DirectMessage, post::Post};
+use crate::db::models::{direct_message::DirectMessage, friend_request::FriendRequest, post::Post};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,14 +17,6 @@ pub struct SynchResponse {
     pub created_posts: Vec<Post>,
     pub edited_posts: Vec<Post>,
     pub sender: String
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FriendRequest {
-    pub from_peer_id: String,
-    pub from_multiaddr: String,
-    pub message: String
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +65,7 @@ pub(crate) enum SwarmCommand {
     AcceptFriendRequest(PeerId),
     DenyFriendRequest(PeerId),
     GetFriendList(Sender<Vec<PeerId>>),
-    GetInboundFriendRequests(Sender<HashMap<PeerId, FriendRequest>>),
+    GetInboundFriendRequests(Sender<Vec<FriendRequest>>),
     GetDirectMessages { sender: Sender<Vec<DirectMessage>>, peer_id: PeerId },
     LoadFeed(Sender<Vec<Post>>),
     LoadBoard { sender: Sender<Vec<Post>>, peer_id: PeerId },

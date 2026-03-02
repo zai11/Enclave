@@ -48,10 +48,13 @@ pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
     if !db.table_exists(None, "tbl_friend_requests")? {
         db.execute("CREATE TABLE tbl_friend_requests (
                             id INTEGER PRIMARY KEY,
-                            from_user_id INTEGER NOT NULL,
+                            from_peer_id TEXT NOT NULL,
+                            from_multiaddr TEXT NOT NULL,
+                            to_peer_id TEXT NOT NULL,
+                            to_multiaddr TEXT NOT NULL,
                             message TEXT,
                             created_at INTEGER NOT NULL,
-                            FOREIGN KEY (from_user_id) REFERENCES tbl_users(id)
+                            pending BOOLEAN DEFAULT 1
                         );", ())?;
         log::info!("Created friend requests table.");
     }
@@ -76,7 +79,8 @@ pub fn init_db(path: &str) -> anyhow::Result<Arc<Mutex<Connection>>> {
                             content TEXT NOT NULL,
                             created_at INTEGER NOT NULL,
                             edited_at INTEGER,
-                            read BOOLEAN DEFAULT 0
+                            read BOOLEAN DEFAULT 0,
+                            pending BOOLEAN DEFAULT 1
                         );", ())?;
         log::info!("Created direct messages table.");
     }
@@ -306,66 +310,50 @@ pub fn fetch_friend_request_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_user_id, message, created_at FROM tbl_friend_requests WHERE id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at, pending FROM tbl_friend_requests WHERE id=?1;")?;
 
     if !query.exists(rusqlite::params![id])? {
         return Err(anyhow::anyhow!("A friend request with id {id} was not found."));
     }
 
-    let (id, from_user_id, message, created_at): (i64, i64, String, i64) = query.query_row(rusqlite::params![id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    let (id, from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at, pending): (i64, String, String, String, String, String, i64, bool) = query.query_row(rusqlite::params![id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
     })?;
 
     Ok(
         FriendRequest::new(
             id,
-            from_user_id,
+            from_peer_id,
+            from_multiaddr,
+            to_peer_id,
+            to_multiaddr,
             message,
-            created_at
+            created_at,
+            pending
         )
     )
 }
 
-pub fn fetch_friend_request_by_from_user_id(db: Arc<Mutex<Connection>>, from_user_id: i64) -> anyhow::Result<FriendRequest> {
+pub fn fetch_friend_requests_from_peer(db: Arc<Mutex<Connection>>, peer_id: String) -> anyhow::Result<Vec<FriendRequest>> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_user_id, message, created_at FROM tbl_friend_requests WHERE from_user_id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at, pending FROM tbl_friend_requests WHERE from_peer_id=?1;")?;
 
-    if !query.exists(rusqlite::params![from_user_id])? {
-        return Err(anyhow::anyhow!("A friend request with from_user_id {from_user_id} was not found."));
+    if !query.exists(rusqlite::params![peer_id])? {
+        return Err(anyhow::anyhow!("A friend request with from_peer_id {peer_id} was not found."));
     }
 
-    let (id, from_user_id, message, created_at): (i64, i64, String, i64) = query.query_row(rusqlite::params![from_user_id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-    })?;
-
-    Ok(
-        FriendRequest::new(
-            id,
-            from_user_id,
-            message,
-            created_at
-        )
-    )
-}
-
-pub fn fetch_all_friend_requests(db: Arc<Mutex<Connection>>) -> anyhow::Result<Vec<FriendRequest>> {
-    let db_guard = db.lock()
-        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-
-    let mut query = db_guard.prepare("SELECT id, from_user_id, message, created_at FROM tbl_friend_requests;")?;
-
-    if !query.exists(())? {
-        return Err(anyhow::anyhow!("No friend request data was found."));
-    }
-
-    let rows = query.query_map((), |row| {
+    let rows = query.query_map(rusqlite::params![peer_id], |row| {
         Ok((
             row.get(0)?,
             row.get(1)?,
             row.get(2)?,
-            row.get(3)?
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?
         ))
     })?;
 
@@ -377,24 +365,124 @@ pub fn fetch_all_friend_requests(db: Arc<Mutex<Connection>>) -> anyhow::Result<V
                 row.0,
                 row.1,
                 row.2,
-                row.3
+                row.3,
+                row.4,
+                row.5,
+                row.6,
+                row.7
             )
         )
     }).collect::<anyhow::Result<Vec<FriendRequest>>>()
 }
 
-pub fn create_friend_request(db: Arc<Mutex<Connection>>, from_user_id: i64, message: String) -> anyhow::Result<i64> {
+pub fn fetch_friend_requests_to_peer(db: Arc<Mutex<Connection>>, peer_id: String) -> anyhow::Result<Vec<FriendRequest>> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at, pending FROM tbl_friend_requests WHERE to_peer_id=?1;")?;
+
+    if !query.exists(rusqlite::params![peer_id])? {
+        return Err(anyhow::anyhow!("A friend request with from_peer_id {peer_id} was not found."));
+    }
+
+    let rows = query.query_map(rusqlite::params![peer_id], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?
+        ))
+    })?;
+
+    rows.map(|row_result| {
+        let row = row_result?;
+
+        Ok(
+            FriendRequest::new(
+                row.0,
+                row.1,
+                row.2,
+                row.3,
+                row.4,
+                row.5,
+                row.6,
+                row.7
+            )
+        )
+    }).collect::<anyhow::Result<Vec<FriendRequest>>>()
+}
+
+pub fn fetch_all_friend_requests(db: Arc<Mutex<Connection>>) -> anyhow::Result<Vec<FriendRequest>> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at, pending FROM tbl_friend_requests;")?;
+
+    if !query.exists(())? {
+        return Err(anyhow::anyhow!("No friend request data was found."));
+    }
+
+    let rows = query.query_map((), |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+            row.get(7)?
+        ))
+    })?;
+
+    rows.map(|row_result| {
+        let row = row_result?;
+
+        Ok(
+            FriendRequest::new(
+                row.0,
+                row.1,
+                row.2,
+                row.3,
+                row.4,
+                row.5,
+                row.6,
+                row.7
+            )
+        )
+    }).collect::<anyhow::Result<Vec<FriendRequest>>>()
+}
+
+pub fn create_friend_request(db: Arc<Mutex<Connection>>, from_peer_id: String, from_multiaddr: String, to_peer_id: String, to_multiaddr: String, message: String) -> anyhow::Result<i64> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
     let created_at = chrono::Utc::now().timestamp();
 
     db_guard.execute(
-        "INSERT INTO tbl_friend_requests (from_user_id, message, created_at) VALUES (?1, ?2, ?3);",
-        rusqlite::params![from_user_id, message, created_at]
+        "INSERT INTO tbl_friend_requests (from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+        rusqlite::params![from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at]
     )?;
 
     Ok(db_guard.last_insert_rowid())
+}
+
+pub fn update_friend_request(db: Arc<Mutex<Connection>>, id: i64, pending: Option<bool>) -> anyhow::Result<()> {
+    let db_guard = db.lock()
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    if let Some(pending) = pending {
+        db_guard.execute(
+            "UPDATE tbl_friend_requests SET pending=?1 WHERE id=?2;", 
+            rusqlite::params![pending, id]
+        )?;
+    }
+    
+    Ok(())
 }
 
 pub fn delete_friend_request(db: Arc<Mutex<Connection>>, id: i64) -> anyhow::Result<()> {
@@ -534,14 +622,14 @@ pub fn fetch_direct_message_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read FROM tbl_direct_messages WHERE id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending FROM tbl_direct_messages WHERE id=?1;")?;
 
     if !query.exists(rusqlite::params![id])? {
         return Err(anyhow::anyhow!("A direct message with id {id} was not found."));
     }
 
-    let (id, from_peer_id, to_peer_id, content, created_at, edited_at, read): (i64, String, String, String, i64, Option<i64>, bool) = query.query_row(rusqlite::params![id], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+    let (id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending): (i64, String, String, String, i64, Option<i64>, bool, bool) = query.query_row(rusqlite::params![id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
     })?;
 
     Ok(
@@ -552,7 +640,8 @@ pub fn fetch_direct_message_by_id(db: Arc<Mutex<Connection>>, id: i64) -> anyhow
             content, 
             created_at, 
             edited_at,
-            read 
+            read,
+            pending
         )
     )
 }
@@ -561,7 +650,7 @@ pub fn fetch_direct_messages_with_peer(db: Arc<Mutex<Connection>>, peer_id: Stri
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read FROM tbl_direct_messages WHERE from_peer_id=?1 OR to_peer_id=?1;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending FROM tbl_direct_messages WHERE from_peer_id=?1 OR to_peer_id=?1;")?;
 
     if !query.exists(rusqlite::params![peer_id])? {
         return Err(anyhow::anyhow!("A direct message with user_id {peer_id} was not found."));
@@ -575,7 +664,8 @@ pub fn fetch_direct_messages_with_peer(db: Arc<Mutex<Connection>>, peer_id: Stri
             row.get(3)?, 
             row.get(4)?, 
             row.get(5)?, 
-            row.get(6)?
+            row.get(6)?,
+            row.get(7)?
         ))
     })?;
 
@@ -589,7 +679,8 @@ pub fn fetch_direct_messages_with_peer(db: Arc<Mutex<Connection>>, peer_id: Stri
             row.3, 
             row.4, 
             row.5, 
-            row.6
+            row.6,
+            row.7
         ))
     }).collect::<anyhow::Result<Vec<DirectMessage>>>()
 }
@@ -598,7 +689,7 @@ pub fn fetch_all_direct_messages(db: Arc<Mutex<Connection>>) -> anyhow::Result<V
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
-    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read FROM tbl_direct_messages;")?;
+    let mut query = db_guard.prepare("SELECT id, from_peer_id, to_peer_id, content, created_at, edited_at, read, pending FROM tbl_direct_messages;")?;
 
     if !query.exists(())? {
         return Err(anyhow::anyhow!("No direct message data was found."));
@@ -613,6 +704,7 @@ pub fn fetch_all_direct_messages(db: Arc<Mutex<Connection>>) -> anyhow::Result<V
             row.get(4)?,
             row.get(5)?,
             row.get(6)?,
+            row.get(7)?
         ))
     })?;
 
@@ -627,7 +719,8 @@ pub fn fetch_all_direct_messages(db: Arc<Mutex<Connection>>) -> anyhow::Result<V
                 row.3,
                 row.4,
                 row.5,
-                row.6
+                row.6,
+                 row.7
             )
         )
     }).collect::<anyhow::Result<Vec<DirectMessage>>>()
@@ -647,16 +740,25 @@ pub fn create_direct_message(db: Arc<Mutex<Connection>>, from_peer_id: String, t
     Ok(db_guard.last_insert_rowid())
 }
 
-pub fn update_direct_message(db: Arc<Mutex<Connection>>, id: i64, content: String) -> anyhow::Result<()> {
+pub fn update_direct_message(db: Arc<Mutex<Connection>>, id: i64, content: Option<String>, pending: Option<bool>) -> anyhow::Result<()> {
     let db_guard = db.lock()
         .map_err(|err| anyhow::anyhow!(err.to_string()))?;
 
     let edited_at = chrono::Utc::now().timestamp();
 
-    db_guard.execute(
-        "UPDATE tbl_direct_messages SET content=?1, edited_at=?2 WHERE id=?3;", 
-        rusqlite::params![content, edited_at, id]
-    )?;
+    if let Some(content) = content {
+        db_guard.execute(
+            "UPDATE tbl_direct_messages SET content=?1, edited_at=?2 WHERE id=?3;", 
+            rusqlite::params![content, edited_at, id]
+        )?;
+    }
+
+    if let Some(pending) = pending {
+        db_guard.execute(
+            "UPDATE tbl_direct_messages SET pending=?1, edited_at=?2 WHERE id=?3;", 
+            rusqlite::params![pending, edited_at, id]
+        )?;
+    }
     
     Ok(())
 }
@@ -1234,26 +1336,16 @@ pub mod test {
     pub fn test_fetch_friend_request_by_id_correctly_fetches_friend_request_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false)
-            .unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;",
-                [],
-                |r| r.get(0)
-            ).unwrap()
-        };
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
 
         let friend_request_id: i64 = {
             let conn = db.lock().unwrap();
             conn.execute(
-                "INSERT INTO tbl_friend_requests (from_user_id, message, created_at) VALUES (?1, ?2, ?3);",
-                params![user_id, "Test", 0]
+                "INSERT INTO tbl_friend_requests (from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+                params![peer_id_1, multiaddr_1, peer_id_2, multiaddr_2, "Test", 0]
             ).unwrap();
             conn.last_insert_rowid()
         };
@@ -1262,52 +1354,84 @@ pub mod test {
             .expect("Friend request fetch failed");
 
         assert_eq!(friend_request.id, friend_request_id);
-        assert_eq!(friend_request.from_user_id, user_id);
+        assert_eq!(friend_request.from_peer_id, peer_id_1);
+        assert_eq!(friend_request.from_multiaddr, multiaddr_1);
+        assert_eq!(friend_request.to_peer_id, peer_id_2);
+        assert_eq!(friend_request.to_multiaddr, multiaddr_2);
     }
 
     #[test]
-    pub fn test_fetch_friend_request_by_user_id_errors_invalid_user_id() {
+    pub fn test_fetch_friend_requests_from_peer_errors_invalid_peer_id() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        let result = fetch_friend_request_by_from_user_id(db.clone(), 999);
+        let result = fetch_friend_requests_from_peer(db.clone(), "An invalid peer id".into());
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("was not found"), "Unexpected error message");
     }
 
     #[test]
-    pub fn test_fetch_friend_request_by_user_id_correctly_fetches_friend_request_data() {
+    pub fn test_fetch_friend_requests_from_peer_correctly_fetches_friend_request_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
 
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false)
+        let friend_request_id_1: i64 = create_friend_request(db.clone(), peer_id_1.clone(), multiaddr_1.clone(), peer_id_2.clone(), multiaddr_2.clone(), "Message 1".into())
+            .unwrap();
+        let friend_request_id_2: i64 = create_friend_request(db.clone(), peer_id_2.clone(), multiaddr_2.clone(), peer_id_1.clone(), multiaddr_1.clone(), "Message 1".into())
             .unwrap();
 
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;",
-                [],
-                |r| r.get(0)
-            ).unwrap()
-        };
+        let friend_requests = fetch_friend_requests_from_peer(db.clone(), peer_id_1.clone())
+            .expect("Friend request fetch failed");
 
-        let friend_request_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.execute(
-                "INSERT INTO tbl_friend_requests (from_user_id, message, created_at) VALUES (?1, ?2, ?3);",
-                params![user_id, false, 0]
-            ).unwrap();
-            conn.last_insert_rowid()
-        };
+        assert_eq!(friend_requests.len(), 1);
+        assert_eq!(friend_requests[0].id, friend_request_id_1);
 
-        let friend_request = fetch_friend_request_by_from_user_id(db.clone(), user_id)
-            .expect("Friend fetch failed");
+        let friend_requests = fetch_friend_requests_from_peer(db.clone(), peer_id_2.clone())
+            .expect("Friend request fetch failed");
 
-        assert_eq!(friend_request.id, friend_request_id);
-        assert_eq!(friend_request.from_user_id, user_id);
+        assert_eq!(friend_requests.len(), 1);
+        assert_eq!(friend_requests[0].id, friend_request_id_2);
+    }
+
+    #[test]
+    pub fn test_fetch_friend_requests_to_peer_errors_invalid_peer_id() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let result = fetch_friend_requests_to_peer(db.clone(), "An invalid peer id".into());
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("was not found"), "Unexpected error message");
+    }
+
+    #[test]
+    pub fn test_fetch_friend_requests_to_peer_correctly_fetches_friend_request_data() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+
+        let friend_request_id_1: i64 = create_friend_request(db.clone(), peer_id_1.clone(), multiaddr_1.clone(), peer_id_2.clone(), multiaddr_2.clone(), "Message 1".into())
+            .unwrap();
+        let friend_request_id_2: i64 = create_friend_request(db.clone(), peer_id_2.clone(), multiaddr_2.clone(), peer_id_1.clone(), multiaddr_1.clone(), "Message 1".into())
+            .unwrap();
+
+        let friend_requests = fetch_friend_requests_to_peer(db.clone(), peer_id_1.clone())
+            .expect("Friend request fetch failed");
+
+        assert_eq!(friend_requests.len(), 1);
+        assert_eq!(friend_requests[0].id, friend_request_id_2);
+
+        let friend_requests = fetch_friend_requests_to_peer(db.clone(), peer_id_2.clone())
+            .expect("Friend request fetch failed");
+
+        assert_eq!(friend_requests.len(), 1);
+        assert_eq!(friend_requests[0].id, friend_request_id_1);
     }
 
     #[test]
@@ -1324,28 +1448,19 @@ pub mod test {
     pub fn test_fetch_all_friend_requests_correctly_fetches_all_friend_request_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;", 
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
 
         let conn = db.lock().unwrap();
         conn.execute(
-            "INSERT INTO tbl_friend_requests (from_user_id, message, created_at) VALUES (?1, ?2, ?3);",
-            rusqlite::params![user_id, "Message 1".to_string(), 0]
+            "INSERT INTO tbl_friend_requests (from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+            rusqlite::params![peer_id_1, multiaddr_1, peer_id_2, multiaddr_2, "Message 1".to_string(), 0]
         ).unwrap();
         conn.execute(
-            "INSERT INTO tbl_friend_requests (from_user_id, message, created_at) VALUES (?1, ?2, ?3);",
-            rusqlite::params![user_id, "Message 2".to_string(), 0]
+            "INSERT INTO tbl_friend_requests (from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+            rusqlite::params![peer_id_1, multiaddr_1, peer_id_2, multiaddr_2, "Message 2".to_string(), 0]
         ).unwrap();
         drop(conn);
 
@@ -1360,65 +1475,68 @@ pub mod test {
     pub fn test_create_friend_request_correctly_inserts_friend_request_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
 
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false)
-            .expect("User creation failed");
+        create_friend_request(db.clone(), peer_id_1.clone(), multiaddr_1.clone(), peer_id_2.clone(), multiaddr_2.clone(), "Message".to_string()).expect("create_friend_request failed");
 
-        let user_id: i64 = {
+        let (stored_id, stored_from_peer_id, stored_from_multiaddr, stored_to_peer_id, stored_to_multiaddr, stored_message): (i64, String, String, String, String, String) = {
             let conn = db.lock().unwrap();
             conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;",
+                "SELECT id, from_peer_id, from_multiaddr, to_peer_id, to_multiaddr, message FROM tbl_friend_requests LIMIT 1;",
                 [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            ).unwrap()
+        };
+
+        assert_eq!(stored_from_peer_id, peer_id_1);
+        assert_eq!(stored_from_multiaddr, multiaddr_1);
+        assert_eq!(stored_to_peer_id, peer_id_2);
+        assert_eq!(stored_to_multiaddr, multiaddr_2);
+        assert_eq!(stored_message, "Message".to_string());
+        assert!(stored_id > 0, "Friend request id should be greater than 0");
+    }
+
+    #[test]
+    pub fn test_update_friend_request_correctly_updates_friend_request_pending() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+
+        create_user(db.clone(), peer_id_1.clone(), multiaddr_1.clone(), false).unwrap();
+        create_user(db.clone(), peer_id_2.clone(), multiaddr_2.clone(), false).unwrap();
+
+        let friend_request_id = create_friend_request(db.clone(), peer_id_1, multiaddr_1, peer_id_2, multiaddr_2, "Test Message".into()).unwrap();
+
+        update_friend_request(db.clone(), friend_request_id, Some(false)).unwrap();
+
+        let updated_pending: bool = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT pending FROM tbl_friend_requests WHERE id=?1;",
+                [friend_request_id],
                 |r| r.get(0)
             ).unwrap()
         };
 
-        create_friend_request(db.clone(), user_id, "Message".to_string()).expect("create_friend_request failed");
-
-        let (stored_id, stored_from_user_id, stored_message): (i64, i64, String) = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id, from_user_id, message FROM tbl_friend_requests LIMIT 1;",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            ).unwrap()
-        };
-
-        assert_eq!(stored_from_user_id, user_id);
-        assert_eq!(stored_message, "Message".to_string());
-        assert!(stored_id > 0, "Friend request id should be greater than 0");
+        assert_eq!(updated_pending, false);
     }
 
     #[test]
     pub fn test_delete_friend_request_correctly_deletes_friend_request_data() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
-        let peer_id = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
-        let multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
 
-        create_user(db.clone(), peer_id.clone(), multiaddr.clone(), false).unwrap();
-
-        let user_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_users LIMIT 1;",
-                [], 
-                |r| r.get(0)
-            ).unwrap()
-        };
-
-        create_friend_request(db.clone(), user_id, "Message".to_string()).unwrap();
-
-        let friend_request_id: i64 = {
-            let conn = db.lock().unwrap();
-            conn.query_row(
-                "SELECT id FROM tbl_friend_requests LIMIT 1;",
-                [],
-                |r| r.get(0)
-            ).unwrap()
-        };
+        let friend_request_id = create_friend_request(db.clone(), peer_id_1, multiaddr_1, peer_id_2, multiaddr_2, "Message".to_string()).unwrap();
 
         delete_friend_request(db.clone(), friend_request_id).expect("delete_friend_request failed");
 
@@ -1755,23 +1873,25 @@ pub mod test {
         create_direct_message(db.clone(), peer_id_1.clone(), peer_id_2.clone(), "Hello DM".to_string())
             .expect("create_direct_message failed");
 
-        let (dm_id, dm_from_peer_id, dm_to_peer_id, dm_content): (i64, String, String, String) = {
+        let (dm_id, dm_from_peer_id, dm_to_peer_id, dm_content, dm_read, dm_pending): (i64, String, String, String, bool, bool) = {
             let conn = db.lock().unwrap();
             conn.query_row(
-                "SELECT id, from_peer_id, to_peer_id, content FROM tbl_direct_messages LIMIT 1;",
+                "SELECT id, from_peer_id, to_peer_id, content, read, pending FROM tbl_direct_messages LIMIT 1;",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
             ).unwrap()
         };
 
         assert_eq!(dm_from_peer_id, peer_id_1);
         assert_eq!(dm_to_peer_id, peer_id_2);
         assert_eq!(dm_content, "Hello DM");
+        assert_eq!(dm_read, false);
+        assert_eq!(dm_pending, true);
         assert!(dm_id > 0);
     }
 
     #[test]
-    pub fn test_update_direct_message_correctly_updates_direct_message_data() {
+    pub fn test_update_direct_message_correctly_updates_direct_message_content() {
         let db = init_db(":memory:".into()).expect("DB init failed");
 
         let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
@@ -1784,7 +1904,7 @@ pub mod test {
 
         let dm_id = create_direct_message(db.clone(), peer_id_1, peer_id_2, "Original Content".to_string()).unwrap();
 
-        update_direct_message(db.clone(), dm_id, "Updated Content".to_string()).unwrap();
+        update_direct_message(db.clone(), dm_id, Some("Updated Content".to_string()), None).unwrap();
 
         let updated_content: String = {
             let conn = db.lock().unwrap();
@@ -1796,6 +1916,34 @@ pub mod test {
         };
 
         assert_eq!(updated_content, "Updated Content");
+    }
+
+    #[test]
+    pub fn test_update_direct_message_correctly_updates_direct_message_pending() {
+        let db = init_db(":memory:".into()).expect("DB init failed");
+
+        let peer_id_1 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let multiaddr_1 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsK".to_string();
+        let peer_id_2 = "12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+        let multiaddr_2 = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWHGLsSWMsiU35gg5zUD9zmHpLrdwpnftASGFwpArLkTsA".to_string();
+
+        create_user(db.clone(), peer_id_1.clone(), multiaddr_1.clone(), false).unwrap();
+        create_user(db.clone(), peer_id_2.clone(), multiaddr_2.clone(), false).unwrap();
+
+        let dm_id = create_direct_message(db.clone(), peer_id_1, peer_id_2, "Test Content".to_string()).unwrap();
+
+        update_direct_message(db.clone(), dm_id, None, Some(false)).unwrap();
+
+        let updated_pending: bool = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT pending FROM tbl_direct_messages WHERE id=?1;",
+                [dm_id],
+                |r| r.get(0)
+            ).unwrap()
+        };
+
+        assert_eq!(updated_pending, false);
     }
 
     #[test]
